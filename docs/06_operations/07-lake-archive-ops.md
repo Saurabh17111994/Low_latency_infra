@@ -55,7 +55,7 @@ dry-run by default, so the first invocation always previews:
 bash code/01_platform/04_scripts/r2-delete-prefix.sh lake/_stale-20261001/raw_table_1/
 
 # delete: deletes, then re-lists each prefix and exits 1 if anything survived
-bash code/01_platform/04_scripts/r2-delete-prefix.sh --apply <prefix> [<prefix>...]
+bash code/01_platform/04_scripts/r2-delete-prefix.sh --apply lake/_stale-20261001/raw_table_1/
 ```
 
 Guards: empty, duplicate and overlapping prefixes are refused before any

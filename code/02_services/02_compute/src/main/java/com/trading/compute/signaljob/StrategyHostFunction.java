@@ -304,6 +304,25 @@ public class StrategyHostFunction
         if (slot == null) {
             return;
         }
+        String tfCode = live.isNullAt(CandleLiveColumns.TF)
+                ? null : live.getString(CandleLiveColumns.TF).toString();
+        // 2026-10-02 (CHG-505): market-only row (TF="MKT") — refresh the shared
+        // snapshot and fan out to the market-update callback only. Never a
+        // forming candle: no features, no KPI, no onLiveTick, no context. The
+        // callback's default is a no-op, so existing strategies are unchanged.
+        if (CandleLiveColumns.TF_MARKET_TICK.equals(tfCode)) {
+            decodeMarketSnapshot(slot.market, live);
+            for (SignalStrategy s : slot.strategies.values()) {
+                try {
+                    s.onMarketUpdate(live, slot.view, new DedupCollector(out, s.ruleId()));
+                } catch (Exception e) {
+                    countFailedStrategy();
+                    LOG.warn("strategy-host: dropping failed onMarketUpdate rule={} token={}: {}",
+                            s.ruleId(), ctx.getCurrentKey(), e.toString());
+                }
+            }
+            return;
+        }
         if (contextProvider != null) {
             // C2: promote any completed fetch before the fan-out, so a
             // strategy whose data arrived since the last tick sees it now
@@ -315,8 +334,7 @@ public class StrategyHostFunction
         // 2026-10-01: all six TF forming rows arrive per tick (fast feed). The
         // canonical FIFTEEN_S row owns the per-tick KPI and the C2 pending
         // snapshot; every row fans out to strategies below.
-        boolean canonicalTick = Timeframe.FIFTEEN_S.code()
-                .equals(String.valueOf(live.getString(CandleLiveColumns.TF)));
+        boolean canonicalTick = Timeframe.FIFTEEN_S.code().equals(tfCode);
         if (canonicalTick) {
             // 2026-10-01 native design: the canonical row is the only carrier
             // of the market snapshot (one row per tick, not six). Decode it

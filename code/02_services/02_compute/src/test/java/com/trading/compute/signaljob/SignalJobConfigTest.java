@@ -997,4 +997,35 @@ class SignalJobConfigTest {
         bad.put("MULTITF_ENABLED", "true");
         assertTrue(SignalJobConfig.from(bad).strategyHostEnabled());
     }
+
+    @Test
+    @DisplayName("CHG-505: STRATEGY_MARKET_TICK_ENABLED defaults off and requires the host")
+    void marketTickFlagComposition() {
+        // Default off.
+        assertFalse(SignalJobConfig.from(env()).strategyMarketTickEnabled());
+
+        // On without the host: fail closed, naming both flags.
+        Map<String, String> bad = env();
+        bad.put("STRATEGY_MARKET_TICK_ENABLED", "true");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(bad));
+        assertTrue(e.getMessage().contains("STRATEGY_MARKET_TICK_ENABLED"), e.getMessage());
+        assertTrue(e.getMessage().contains("STRATEGY_HOST_ENABLED"), e.getMessage());
+
+        // The coherent pair parses and carries the flag.
+        bad.put("STRATEGY_HOST_ENABLED", "true");
+        bad.put("MULTITF_ENABLED", "true");
+        bad.put("STRATEGIES", "n7-range-breakout-v1");
+        assertTrue(SignalJobConfig.from(bad).strategyMarketTickEnabled());
+    }
+
+    @Test
+    @DisplayName("CHG-505: an invalid STRATEGY_MARKET_TICK_ENABLED boolean fails fast")
+    void rejectsInvalidMarketTickBoolean() {
+        Map<String, String> env = env();
+        env.put("STRATEGY_MARKET_TICK_ENABLED", "yes");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(env));
+        assertTrue(e.getMessage().contains("STRATEGY_MARKET_TICK_ENABLED"), e.getMessage());
+    }
 }

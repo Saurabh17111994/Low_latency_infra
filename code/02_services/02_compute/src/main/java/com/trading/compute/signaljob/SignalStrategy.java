@@ -161,4 +161,21 @@ public interface SignalStrategy extends Serializable {
             throws Exception {
         onContextReady(live, view.context(), view.features(), out);
     }
+
+    /**
+     * Market-only update (2026-10-02, CHG-505): the host hands the fresh market
+     * state when a non-trade tick changed it and no forming-candle row was
+     * emitted ({@code STRATEGY_MARKET_TICK_ENABLED}). The row is a
+     * {@link CandleLiveColumns} layout with {@code TF="MKT"} — identity and the
+     * 44-column market section are meaningful; the candle columns are null.
+     *
+     * <p><b>Default no-op</b>, so every strategy written before this callback
+     * behaves exactly as before. A strategy that wants to fire on book/stat
+     * moves alone overrides this and decides with its own rule; emitted rows go
+     * through the host's per-rule dedup exactly like the other callbacks. The
+     * host calls this instead of {@link #onLiveTick} on a market row — never
+     * both.
+     */
+    default void onMarketUpdate(RowData market, StrategyView view, Collector<RowData> out)
+            throws Exception {}
 }

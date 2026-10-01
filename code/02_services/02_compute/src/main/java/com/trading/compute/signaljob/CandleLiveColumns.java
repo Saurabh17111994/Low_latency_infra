@@ -133,6 +133,15 @@ public final class CandleLiveColumns {
 
     public static final String SCHEMA_VERSION_V1 = "1";
 
+    /**
+     * Transport-only tf discriminator for market-only rows (2026-10-02,
+     * CHG-505): the aggregator emits one when a non-trade tick changed the
+     * market snapshot, so the strategy host can evaluate book/stat rules
+     * without waiting for a trade. Never a real timeframe, never persisted,
+     * never parsed by {@link Timeframe#fromCode}.
+     */
+    public static final String TF_MARKET_TICK = "MKT";
+
     /** Fluss {@code DataTypeRoot} name per column; the market section is BIGINT NULL by construction. */
     public static final List<String> TYPE_ROOTS = List.of(
             "BIGINT", "STRING", "STRING", "STRING",

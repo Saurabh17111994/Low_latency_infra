@@ -150,6 +150,16 @@ class SignalJobOperatorUidTest {
     }
 
     @Test
+    @DisplayName("CHG-505: the market-tick flag adds no operator — the UID set is unchanged")
+    void marketTickFlagAddsNoOperator() throws Exception {
+        // The market-only row rides the existing fast side output; with the
+        // flag on the graph must still satisfy the exact same UID contract
+        // (this helper asserts every node has an explicit UID and the set
+        // equals baseline + multi-TF + host).
+        assertTopology(true, true, true);
+    }
+
+    @Test
     @DisplayName("legacy candle sink UIDs are retired; the merged sink carries the write (W-C5a)")
     void legacyCandleSinkUidsAreRetired() throws Exception {
         // Wave C W-C5a (DEC-059 end state): the guarded legacy sinks and their
@@ -245,10 +255,15 @@ class SignalJobOperatorUidTest {
     }
 
     private void assertTopology(boolean multiTfEnabled) throws Exception {
-        assertTopology(multiTfEnabled, false);
+        assertTopology(multiTfEnabled, false, false);
     }
 
     private void assertTopology(boolean multiTfEnabled, boolean hostEnabled) throws Exception {
+        assertTopology(multiTfEnabled, hostEnabled, false);
+    }
+
+    private void assertTopology(boolean multiTfEnabled, boolean hostEnabled,
+            boolean marketTickEnabled) throws Exception {
         String suffix = String.valueOf(System.nanoTime());
         String candleName = "p6_uid_" + suffix + "_candle";
         String signalName = "p6_uid_" + suffix + "_sig";
@@ -278,6 +293,9 @@ class SignalJobOperatorUidTest {
         if (hostEnabled) {
             cfg.put("STRATEGY_HOST_ENABLED", "true");
             cfg.put("STRATEGIES", N7RangeBreakoutStrategy.RULE_ID);
+        }
+        if (marketTickEnabled) {
+            cfg.put("STRATEGY_MARKET_TICK_ENABLED", "true");
         }
         StreamExecutionEnvironment senv = SignalJob.buildTopology(SignalJobConfig.from(cfg));
         StreamGraph graph = senv.getStreamGraph();

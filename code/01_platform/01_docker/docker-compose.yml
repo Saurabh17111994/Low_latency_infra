@@ -92,6 +92,12 @@ x-flink-common: &flink-common
     # too, so all three cannot diverge; the switches above are the only opt-in.
     STRATEGY_HOST_ENABLED: ${STRATEGY_HOST_ENABLED:-false}
     STRATEGIES: ${STRATEGIES:-}
+    # 2026-10-02 (CHG-505): market-only rows (TF="MKT") on the fast feed when a
+    # non-trade tick changed the snapshot, so a book/stat rule can be evaluated
+    # without a trade. Consumed by the strategy host, so true requires
+    # STRATEGY_HOST_ENABLED=true (SignalJobConfig fails closed otherwise);
+    # inert when MULTITF_FAST_LIVE_FEED=false.
+    STRATEGY_MARKET_TICK_ENABLED: ${STRATEGY_MARKET_TICK_ENABLED:-false}
     EXECUTION_INTENT_ENABLED: ${EXECUTION_INTENT_ENABLED:-false}
     <<: *execution_identity
     EXECUTION_PRODUCT_TYPE: ${EXECUTION_PRODUCT_TYPE:-CNC}

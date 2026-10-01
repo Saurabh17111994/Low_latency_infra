@@ -47,6 +47,12 @@ class MultiTimeframeMarketSnapshotTest {
         openWith(new MultiTimeframeAggregateFunction(LIVE_INTERVAL, false, true, true));
     }
 
+    /** Fast feed + the CHG-505 market-tick flag on. */
+    private void openFastWithMarketTick() throws Exception {
+        openWith(new MultiTimeframeAggregateFunction(LIVE_INTERVAL, false, true, true,
+                SignalJobConfig.DEFAULT_ALLOWED_LATENESS_MS, true));
+    }
+
     private void openWith(MultiTimeframeAggregateFunction f) throws Exception {
         fn = f;
         harness = ProcessFunctionTestHarnesses.forKeyedProcessFunction(
@@ -138,6 +144,18 @@ class MultiTimeframeMarketSnapshotTest {
         if (side != null) {
             for (StreamRecord<RowData> sr : side) {
                 out.add(sr.getValue());
+            }
+        }
+        return out;
+    }
+
+    /** Fast-feed rows whose TF discriminator matches. */
+    private static List<RowData> rowsWithTf(List<RowData> rows, String tf) {
+        List<RowData> out = new ArrayList<>();
+        for (RowData r : rows) {
+            if (!r.isNullAt(CandleLiveColumns.TF)
+                    && tf.equals(r.getString(CandleLiveColumns.TF).toString())) {
+                out.add(r);
             }
         }
         return out;
@@ -361,5 +379,92 @@ class MultiTimeframeMarketSnapshotTest {
         assertEquals(T0 + 1_000L, r.getLong(CandleLiveColumns.MKT_STATS_CHANGED_AT),
                 "the quote carried no stats change");
         assertEquals(9_999L, r.getLong(CandleLiveColumns.MKT_BID_PX_1));
+    }
+
+    // — market-only rows (CHG-505) ————————————————————————————————————————
+
+    @Test
+    @DisplayName("a changed quote emits one TF=MKT row: identity + market section + clocks")
+    void changedQuoteEmitsOneMarketRow() throws Exception {
+        openFastWithMarketTick();
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0);
+        harness.processElement(
+                marketAll(tick(T0 + 1_000L, "fp-t", "TRADE", 100_00L, 10L), 1_000L),
+                T0 + 1_000L);
+        assertEquals(0, rowsWithTf(fastRows(), CandleLiveColumns.TF_MARKET_TICK).size(),
+                "an accepted trade carries the section on its forming rows, never a market row");
+
+        harness.processElement(
+                marketAll(tick(T0 + 2_000L, "fp-q", "QUOTE", 100_50L, 0L), 3_000L),
+                T0 + 2_000L);
+
+        List<RowData> marketRows = rowsWithTf(fastRows(), CandleLiveColumns.TF_MARKET_TICK);
+        assertEquals(1, marketRows.size(), "one market row per changed quote");
+        RowData r = marketRows.get(0);
+        assertEquals(TOKEN, r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN));
+        assertEquals("NSE", r.getString(CandleLiveColumns.EXCHANGE).toString());
+        assertEquals("TEST", r.getString(CandleLiveColumns.SYMBOL).toString());
+        assertEquals(3_013L, r.getLong(CandleLiveColumns.MKT_BID_PX_1));
+        assertEquals(3_042L, r.getLong(CandleLiveColumns.MKT_ASK_ORD_5));
+        assertEquals(T0 + 2_000L, r.getLong(CandleLiveColumns.MKT_STATS_CHANGED_AT));
+        assertEquals(T0 + 2_000L, r.getLong(CandleLiveColumns.MKT_DEPTH_CHANGED_AT));
+        // Not a forming candle: the candle prefix is zero-defaulted, and no
+        // forming row was emitted for the quote (six forming rows, one per TF,
+        // plus this one market row).
+        assertEquals(0L, r.getLong(CandleLiveColumns.CLOSE_PAISE));
+        assertEquals(T0 + 2_000L, r.getLong(CandleLiveColumns.LAST_EVENT_TIME));
+        assertEquals(7, fastRows().size(), "six forming rows + one market row");
+        assertEquals(1, rowsWithTf(fastRows(), "FIFTEEN_S").size(),
+                "a quote still emits no forming row");
+    }
+
+    @Test
+    @DisplayName("a repeated identical quote emits nothing — no change, no row")
+    void repeatedQuoteEmitsNothing() throws Exception {
+        openFastWithMarketTick();
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0);
+        harness.processElement(
+                marketAll(tick(T0 + 1_000L, "fp-t", "TRADE", 100_00L, 10L), 1_000L),
+                T0 + 1_000L);
+        harness.processElement(
+                marketAll(tick(T0 + 2_000L, "fp-q1", "QUOTE", 100_50L, 0L), 3_000L),
+                T0 + 2_000L);
+        harness.processElement(
+                marketAll(tick(T0 + 3_000L, "fp-q2", "QUOTE", 100_50L, 0L), 3_000L),
+                T0 + 3_000L);
+
+        assertEquals(1, rowsWithTf(fastRows(), CandleLiveColumns.TF_MARKET_TICK).size(),
+                "the second quote repeated every value — neither clock moved, no row");
+    }
+
+    @Test
+    @DisplayName("flag off: a changed quote emits no market row")
+    void flagOffEmitsNoMarketRow() throws Exception {
+        openFast();
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0);
+        harness.processElement(
+                marketAll(tick(T0 + 1_000L, "fp-t", "TRADE", 100_00L, 10L), 1_000L),
+                T0 + 1_000L);
+        harness.processElement(
+                marketAll(tick(T0 + 2_000L, "fp-q", "QUOTE", 100_50L, 0L), 3_000L),
+                T0 + 2_000L);
+
+        assertEquals(0, rowsWithTf(fastRows(), CandleLiveColumns.TF_MARKET_TICK).size());
+    }
+
+    @Test
+    @DisplayName("fast feed off: the market row is inert (the 1s mirror carries the section)")
+    void marketRowInertOnFallbackFeed() throws Exception {
+        openWith(new MultiTimeframeAggregateFunction(LIVE_INTERVAL, false, true, false,
+                SignalJobConfig.DEFAULT_ALLOWED_LATENESS_MS, true));
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0);
+        harness.processElement(
+                marketAll(tick(T0 + 1_000L, "fp-t", "TRADE", 100_00L, 10L), 1_000L),
+                T0 + 1_000L);
+        harness.processElement(
+                marketAll(tick(T0 + 2_000L, "fp-q", "QUOTE", 100_50L, 0L), 3_000L),
+                T0 + 2_000L);
+
+        assertEquals(0, rowsWithTf(fastRows(), CandleLiveColumns.TF_MARKET_TICK).size());
     }
 }

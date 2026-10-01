@@ -292,6 +292,10 @@ public final class SignalJob {
             // candle of every timeframe. MULTITF_FAST_LIVE_FEED=false restores
             // the old 1s all-TF snapshot feed without a code change; the 1s
             // snapshot stream itself stays the Fluss mirror cadence.
+            // STRATEGY_MARKET_TICK_ENABLED (2026-10-02, CHG-505) adds market-only
+            // rows (TF="MKT") on the same fast side output when a non-trade tick
+            // changed the market snapshot, so book/stat rules can fire without
+            // a trade; no new operator, no graph change.
             boolean fastLive = config.strategyHostEnabled() && config.multiTfFastLiveFeed();
             SingleOutputStreamOperator<RowData> aggregator = monitored
                     .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
@@ -299,7 +303,8 @@ public final class SignalJob {
                             config.multiTfSessionBypass(),
                             config.multiTfSignalContextEnabled(),
                             fastLive,
-                            config.allowedLatenessMs()))
+                            config.allowedLatenessMs(),
+                            config.strategyMarketTickEnabled()))
                     .returns(CandleClosedColumns.ROW_TYPE_INFO)
                     .name("multi-tf-aggregator")
                     .uid("multi-tf-aggregator-v1");

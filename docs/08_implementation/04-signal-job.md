@@ -86,6 +86,18 @@
 >   (`UNALIGNED_CHECKPOINTS`, default true). Measured tick→strategy p50 49 ms /
 >   p99 93 ms on the full 2 433-instrument universe at 2 Hz — see
 >   `docs/plans/2026-09-26-signal-source-latency-tuning.md`.
+> - Signal audit + book-move evaluation (2026-10-02, CHG-504/505): every fired
+>   signal carries a full **v2 audit** in `score_inputs` (strategy setup, fire
+>   path `live|arm`, the candle in context, and the complete 42-value market
+>   snapshot with clocks and ages — built by `SignalAuditJson`; the free STRING
+>   column, no DDL change), and with `STRATEGY_MARKET_TICK_ENABLED` (default
+>   OFF; on in dev for the smoke) the aggregator emits a **market-only row**
+>   (`TF="MKT"`, identity + market section, no OHLC) on the existing fast side
+>   output when a non-trade tick changed the snapshot — no new operator, no
+>   graph change, no new state. The strategy host refreshes its snapshot and
+>   calls the new default no-op `onMarketUpdate(market, view, out)`, so a
+>   book/stat rule can be evaluated without waiting for a trade; the signal
+>   still fires only on a rule match and only the host appends it.
 > - Everything below that describes the 15 s candle, the forming bar, or the old
 >   signal sinks is HISTORICAL and superseded where it conflicts. The dedup-state
 >   (DESIGN-B) banner below is unaffected.
@@ -487,6 +499,7 @@ Actual chaining is performance-tested; logical boundaries remain explicit for me
 | `FLUSS_SCANNER_FETCH_*`, `BUFFER_TIMEOUT_MS` (new, 2026-09-26) | **S5→S6 latency tuning (CHG-315):** the raw-source Fluss scanner fetch chunk and the Flink output-buffer flush timeout are env-tunable with latency-tuned defaults — `FLUSS_SCANNER_FETCH_MAX_BYTES` (default 512 KiB; Fluss default 16 MiB), `FLUSS_SCANNER_FETCH_MAX_BYTES_FOR_BUCKET` (default 128 KiB; Fluss default 1 MiB), `FLUSS_SCANNER_FETCH_WAIT_MAX_TIME_MS` (default 20; Fluss default 500), `BUFFER_TIMEOUT_MS` (default 10; Flink default 100). `max-bytes-for-bucket > max-bytes` fails closed. Measured on the full 2 433-instrument universe @ 20 Hz: S6 p50 316→27 ms, p95 543→43 ms, p99 599→55 ms, post-dedup throughput 48.4k→48.8k rows/s, source `pendingRecords` standing backlog 1 673→0; the residual ~1.1 s p99 sink tail is checkpoint-dominated (60 s interval, p50 680 ms end-to-end), a separate lever. Evidence `logs/stage-profile-20260926-015722/`; plan `docs/plans/2026-09-26-signal-source-latency-tuning.md`. |
 
 | `MULTITF_FAST_LIVE_FEED` (new, 2026-09-26) | **Low-latency in-memory signal feed (CHG-316):** with the strategy host enabled, the multi-TF aggregator emits each timeframe's forming row on every accepted trade tick (FIFTEEN_S first; the other five TFs added 2026-10-01, CHG-484) to the fast side output `candle-live-tick` (the host stores nothing on the live path — closed-only storage, CHG-486 — so the stream does not multiply Fluss writes) and the host reads that stream in memory instead of waiting for the 1 s `LIVE_TAG` snapshot; the mirror cadence is unchanged. Default `true`; `false` restores the snapshot feed (kill switch). New histogram `compute.latency.tick_to_strategy` (tick event-time → host read; same shape as `compute.latency.ingest_to_monitor`) and counter `compute.candles.live.tick.emitted`. Measured @ 2 Hz, 200 s: p50 564→49 ms, p95 1 592→80 ms, p99 2 288→93 ms (runs `logs/stage-profile-20260926-034308` snapshot vs `...033605` fast, after the CHG-317 bridge age-flush fix). |
+| `STRATEGY_MARKET_TICK_ENABLED` (new, 2026-10-02) | **Market-only rows for book/stat evaluation (CHG-505):** with the strategy host + fast feed on, a non-trade tick that actually changed the 42-value snapshot emits one `TF="MKT"` row (identity + the 44-column market section, zero-defaulted candle prefix) on the existing `candle-live-tick` side output — the same change result that stamps `statsChangedAt`/`depthChangedAt`, so trigger and state cannot disagree; a repeated identical quote emits nothing, an accepted trade never emits one (its forming rows carry the section). No new operator (the graph is byte-identical), no new state, no timers. The host decodes the section and calls the new default no-op `onMarketUpdate(market, view, out)`; a signal still fires only on a rule match. Default `false`; requires `STRATEGY_HOST_ENABLED=true` (fail closed), inert when `MULTITF_FAST_LIVE_FEED=false`. Counter `compute.market.tick.emitted`. |
 
 Deployment SHALL reject unbounded or too-short `DEDUP_TTL`, missing production checkpoint storage, unbounded checkpoint restart retry, and any deviation from pinned values.
 

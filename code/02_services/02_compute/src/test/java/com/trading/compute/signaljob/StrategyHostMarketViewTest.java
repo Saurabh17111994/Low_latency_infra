@@ -10,6 +10,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.ProcessFunctionTestHarnesses;
 import org.apache.flink.table.data.GenericRowData;
@@ -145,6 +146,32 @@ class StrategyHostMarketViewTest {
         return r;
     }
 
+    /** A TF=MKT row as the aggregator emits it (CHG-505): identity + market, no candle. */
+    private static RowData marketTick(long token, long bidPx1, long statsChangedAt,
+            long depthChangedAt) {
+        GenericRowData r = new GenericRowData(CandleLiveColumns.FIELD_COUNT);
+        r.setField(CandleLiveColumns.INSTRUMENT_TOKEN, token);
+        r.setField(CandleLiveColumns.EXCHANGE, StringData.fromString("NSE"));
+        r.setField(CandleLiveColumns.SYMBOL, StringData.fromString("TEST"));
+        r.setField(CandleLiveColumns.TF, StringData.fromString(CandleLiveColumns.TF_MARKET_TICK));
+        r.setField(CandleLiveColumns.WINDOW_START, 7_000L);
+        r.setField(CandleLiveColumns.WINDOW_END, 7_000L);
+        r.setField(CandleLiveColumns.OPEN_PAISE, 0L);
+        r.setField(CandleLiveColumns.HIGH_PAISE, 0L);
+        r.setField(CandleLiveColumns.LOW_PAISE, 0L);
+        r.setField(CandleLiveColumns.CLOSE_PAISE, 0L);
+        r.setField(CandleLiveColumns.VOLUME, 0L);
+        r.setField(CandleLiveColumns.TICK_COUNT, 0);
+        r.setField(CandleLiveColumns.LAST_EVENT_TIME, 7_000L);
+        r.setField(CandleLiveColumns.SCHEMA_VERSION, StringData.fromString("1"));
+        r.setField(CandleLiveColumns.INGEST_TS, 0L);
+        r.setField(CandleLiveColumns.MKT_BID_PX_1, bidPx1);
+        r.setField(CandleLiveColumns.MKT_BID_QTY_1, 10L);
+        r.setField(CandleLiveColumns.MKT_STATS_CHANGED_AT, statsChangedAt);
+        r.setField(CandleLiveColumns.MKT_DEPTH_CHANGED_AT, depthChangedAt);
+        return r;
+    }
+
     private ViewProbe probe() {
         return (ViewProbe) function.strategyForTest(TOKEN, ViewProbe.RULE_ID);
     }
@@ -258,6 +285,108 @@ class StrategyHostMarketViewTest {
         assertEquals(5_001L, probe.lastView.market().depthChangedAt());
     }
 
+    @Test
+    @DisplayName("a TF=MKT row refreshes the view and calls onMarketUpdate only")
+    void marketRowCallsOnMarketUpdateOnly() throws Exception {
+        open();
+        long ws = 120_000L;
+        harness.processElement1(withMarket(live(TOKEN, Timeframe.FIFTEEN_S, ws, 1_000L)), ws + 1_000L);
+        ViewProbe probe = probe();
+        assertEquals(1, probe.liveCalls);
+        StrategyView liveView = probe.lastView;
+
+        harness.processElement1(marketTick(TOKEN, 9_999L, 8_000L, 8_001L), ws + 2_000L);
+
+        assertEquals(1, probe.marketCalls, "exactly one market-update callback");
+        assertEquals(1, probe.liveCalls, "a market row must not call onLiveTick");
+        assertEquals(0, probe.closeCalls);
+        assertEquals(9_999L, probe.lastMarketBidPx1, "the view carries the fresh market");
+        assertEquals(9_999L, probe.lastView.market().bidPxPaise(1));
+        assertEquals(8_001L, probe.lastView.market().depthChangedAt());
+        assertSame(liveView, probe.lastView, "stable bundle across callbacks");
+    }
+
+    @Test
+    @DisplayName("the default onMarketUpdate is a no-op: existing strategies never see a market row")
+    void defaultOnMarketUpdateIsNoOp() throws Exception {
+        Strategies.registerForTest(NoMarketProbe.RULE_ID, (config, metrics) -> new NoMarketProbe());
+        try {
+            StrategyHostFunction fn = new StrategyHostFunction(
+                    SignalJobConfig.from(env()), List.of(NoMarketProbe.RULE_ID));
+            harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
+                    fn,
+                    r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
+                    r -> r.getLong(CandleClosedColumns.INSTRUMENT_TOKEN),
+                    Types.LONG);
+            harness.open();
+
+            harness.processElement1(marketTick(TOKEN, 9_999L, 8_000L, 8_001L), 1_000L);
+
+            NoMarketProbe probe = (NoMarketProbe) fn.strategyForTest(TOKEN, NoMarketProbe.RULE_ID);
+            assertEquals(0, probe.liveCalls, "onLiveTick must not fire for a market row");
+        } finally {
+            Strategies.unregisterForTest(NoMarketProbe.RULE_ID);
+        }
+    }
+
+    @Test
+    @DisplayName("a throwing onMarketUpdate is isolated: the next strategy still gets the row")
+    void marketRowFailureIsIsolated() throws Exception {
+        Strategies.registerForTest(ThrowingMarketProbe.RULE_ID,
+                (config, metrics) -> new ThrowingMarketProbe());
+        try {
+            StrategyHostFunction fn = new StrategyHostFunction(
+                    SignalJobConfig.from(env()),
+                    List.of(ThrowingMarketProbe.RULE_ID, ViewProbe.RULE_ID));
+            harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
+                    fn,
+                    r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
+                    r -> r.getLong(CandleClosedColumns.INSTRUMENT_TOKEN),
+                    Types.LONG);
+            harness.open();
+
+            harness.processElement1(marketTick(TOKEN, 9_999L, 8_000L, 8_001L), 1_000L);
+
+            ViewProbe probe = (ViewProbe) fn.strategyForTest(TOKEN, ViewProbe.RULE_ID);
+            assertEquals(1, probe.marketCalls, "the failing rule must not starve the next one");
+        } finally {
+            Strategies.unregisterForTest(ThrowingMarketProbe.RULE_ID);
+        }
+    }
+
+    @Test
+    @DisplayName("a strategy can fire from onMarketUpdate: the row is forwarded and deduped")
+    void marketUpdateCanFireASignal() throws Exception {
+        Strategies.registerForTest(FiringMarketProbe.RULE_ID,
+                (config, metrics) -> new FiringMarketProbe());
+        try {
+            StrategyHostFunction fn = new StrategyHostFunction(
+                    SignalJobConfig.from(env()), List.of(FiringMarketProbe.RULE_ID));
+            harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
+                    fn,
+                    r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
+                    r -> r.getLong(CandleClosedColumns.INSTRUMENT_TOKEN),
+                    Types.LONG);
+            harness.open();
+
+            harness.processElement1(marketTick(TOKEN, 9_999L, 8_000L, 8_001L), 1_000L);
+            assertEquals(1, harness.getOutput().size(), "the book-move signal is forwarded");
+            assertEquals(1L, fn.emittedForTest());
+            @SuppressWarnings("unchecked")
+            StreamRecord<RowData> rec = (StreamRecord<RowData>) harness.getOutput().peek();
+            assertEquals("book-probe-9-9999",
+                    rec.getValue().getString(SignalCandidatesTableColumns.CANDIDATE_ID).toString());
+
+            // Same bid again -> same deterministic id -> the host dedups it.
+            harness.processElement1(marketTick(TOKEN, 9_999L, 8_000L, 8_001L), 2_000L);
+            assertEquals(1, harness.getOutput().size(),
+                    "a repeated market row with the same id is deduped");
+            assertEquals(1L, fn.suppressedForTest());
+        } finally {
+            Strategies.unregisterForTest(FiringMarketProbe.RULE_ID);
+        }
+    }
+
     /** View-aware probe: records the market on all three callbacks and asks for context once. */
     static final class ViewProbe implements SignalStrategy {
         private static final long serialVersionUID = 1L;
@@ -270,9 +399,11 @@ class StrategyHostMarketViewTest {
         int liveCalls;
         int closeCalls;
         int readyCalls;
+        int marketCalls;
         StrategyView lastView;
         long lastClosedBidPx1 = -1L;
         long lastReadyBidPx1 = -1L;
+        long lastMarketBidPx1 = -1L;
 
         ViewProbe(boolean requestContext) {
             this.requestContext = requestContext;
@@ -311,6 +442,87 @@ class StrategyHostMarketViewTest {
             readyCalls++;
             lastView = view;
             lastReadyBidPx1 = view.market().bidPxPaise(1);
+        }
+
+        @Override
+        public void onMarketUpdate(RowData market, StrategyView view, Collector<RowData> out) {
+            marketCalls++;
+            lastView = view;
+            lastMarketBidPx1 = view.market().bidPxPaise(1);
+        }
+    }
+
+    /** No onMarketUpdate override: the interface default must be a true no-op. */
+    static final class NoMarketProbe implements SignalStrategy {
+        private static final long serialVersionUID = 1L;
+        static final String RULE_ID = "no-market-probe-v1";
+
+        int liveCalls;
+
+        @Override
+        public String ruleId() {
+            return RULE_ID;
+        }
+
+        @Override
+        public void onClosedCandle(RowData closed, Collector<RowData> out) {}
+
+        @Override
+        public void onLiveTick(RowData live, Collector<RowData> out) {
+            liveCalls++;
+        }
+    }
+
+    /** Fails every market update: the host must isolate it and keep going. */
+    static final class ThrowingMarketProbe implements SignalStrategy {
+        private static final long serialVersionUID = 1L;
+        static final String RULE_ID = "throwing-market-probe-v1";
+
+        @Override
+        public String ruleId() {
+            return RULE_ID;
+        }
+
+        @Override
+        public void onClosedCandle(RowData closed, Collector<RowData> out) {}
+
+        @Override
+        public void onLiveTick(RowData live, Collector<RowData> out) {}
+
+        @Override
+        public void onMarketUpdate(RowData market, StrategyView view, Collector<RowData> out) {
+            throw new IllegalStateException("boom");
+        }
+    }
+
+    /**
+     * Fires one candidate row per distinct best bid from the market callback —
+     * the capability the CHG-505 flag unlocks (a signal from a book move).
+     */
+    static final class FiringMarketProbe implements SignalStrategy {
+        private static final long serialVersionUID = 1L;
+        static final String RULE_ID = "firing-market-probe-v1";
+
+        @Override
+        public String ruleId() {
+            return RULE_ID;
+        }
+
+        @Override
+        public void onClosedCandle(RowData closed, Collector<RowData> out) {}
+
+        @Override
+        public void onLiveTick(RowData live, Collector<RowData> out) {}
+
+        @Override
+        public void onMarketUpdate(RowData market, StrategyView view, Collector<RowData> out) {
+            long token = market.getLong(CandleLiveColumns.INSTRUMENT_TOKEN);
+            long bid = view.market().bidPxPaise(1);
+            GenericRowData row = new GenericRowData(SignalCandidatesTableColumns.FIELD_COUNT);
+            row.setField(SignalCandidatesTableColumns.CANDIDATE_ID,
+                    StringData.fromString("book-probe-" + token + "-" + bid));
+            row.setField(SignalCandidatesTableColumns.DETECTION_TS, 7_000L);
+            out.collect(row);
         }
     }
 }

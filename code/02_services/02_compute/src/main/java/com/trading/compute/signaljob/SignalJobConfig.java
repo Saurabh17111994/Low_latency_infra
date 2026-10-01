@@ -144,6 +144,12 @@ public record SignalJobConfig(
         StartupMode startupMode,
         boolean strategyHostEnabled,
         List<String> strategyIds,
+        // 2026-10-02 (CHG-505): market-only rows on the fast feed when a
+        // non-trade tick changed the snapshot (depth or stats), so a book/stat
+        // rule can fire without a trade. STRATEGY_MARKET_TICK_ENABLED, default
+        // false; requires STRATEGY_HOST_ENABLED (which itself requires
+        // MULTITF_ENABLED). Inert when MULTITF_FAST_LIVE_FEED=false.
+        boolean strategyMarketTickEnabled,
         // C1 live-candle context provider (docs/plans/2026-09-30-strategy-
         // context-live-fetch.md): the strategy host opens an on-demand
         // candle_closed lookup provider behind STRATEGY_CONTEXT_ENABLED
@@ -265,6 +271,17 @@ public record SignalJobConfig(
                     + "live/closed streams; with MULTITF_ENABLED=false no strategy-host "
                     + "branch would be wired and the listed strategies would never run");
         }
+        // 2026-10-02 (CHG-505): market-only rows on the fast feed, emitted by
+        // the multi-TF aggregator and consumed by the strategy host. Enabling
+        // it without the host is a config error, not a silent no-op (same
+        // fail-closed shape as the C1 context provider below).
+        boolean strategyMarketTickEnabled =
+                booleanValue(env, "STRATEGY_MARKET_TICK_ENABLED", false);
+        if (strategyMarketTickEnabled && !strategyHostEnabled) {
+            throw new IllegalStateException("Config STRATEGY_MARKET_TICK_ENABLED=true requires "
+                    + "STRATEGY_HOST_ENABLED=true — the market-only rows are consumed by the "
+                    + "strategy host (which itself requires MULTITF_ENABLED=true)");
+        }
         // C1 live-candle context provider (docs/plans/2026-09-30-strategy-
         // context-live-fetch.md): the provider runs inside the strategy host,
         // so enabling it without the host is a config error, not a silent
@@ -375,6 +392,7 @@ public record SignalJobConfig(
                 mode,
                 strategyHostEnabled,
                 strategyIds,
+                strategyMarketTickEnabled,
                 strategyContextEnabled,
                 contextCacheBytes,
                 contextMaxInflight,
@@ -431,6 +449,11 @@ public record SignalJobConfig(
     /** The candle table — merged candle+features (DEC-059; default candle_features). */
     public String mergedCandleTable() {
         return mergedCandleTable;
+    }
+
+    /** True when the aggregator emits market-only rows on a changed non-trade tick (default false). */
+    public boolean strategyMarketTickEnabled() {
+        return strategyMarketTickEnabled;
     }
 
     /** True when the host opens the on-demand context provider (C1, default false). */

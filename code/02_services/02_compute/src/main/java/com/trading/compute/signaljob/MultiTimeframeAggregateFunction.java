@@ -117,6 +117,16 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     private final boolean emitLiveTick;
 
     /**
+     * Market-only rows on the fast feed (2026-10-02, CHG-505): when true, a
+     * non-trade tick that actually changed the market snapshot emits one
+     * {@code TF="MKT"} row (identity + the 44-column market section, no OHLC)
+     * to {@link #LIVE_TICK_TAG}, so the strategy host can evaluate book/stat
+     * rules without waiting for a trade. Wired from
+     * {@code STRATEGY_MARKET_TICK_ENABLED}; inert when the fast feed is off.
+     */
+    private final boolean marketTickEnabled;
+
+    /**
      * M3-1: out-of-orderness tolerance from {@code ALLOWED_LATENESS_MS}. Before
      * this field existed the three arithmetic sites hardcoded 5 000 ms, so a
      * deployment that configured a different tolerance was silently ignored.
@@ -151,6 +161,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     private transient Counter restoredTimerNoopCounter;
     private transient Counter liveEmittedCounter;
     private transient Counter liveTickEmittedCounter;
+    private transient Counter marketTickEmittedCounter;
 
     /** Per-key slot holder. */
     static final class Slot implements Serializable {
@@ -205,9 +216,13 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
      * tolerance {@link SignalJobConfig} parsed from {@code ALLOWED_LATENESS_MS}
      * — eviction, the late-window gate and the emitted-map bound must all use
      * it, or the configured value only half-exists.
+     *
+     * <p>2026-10-02 (CHG-505): {@code marketTickEnabled} adds the market-only
+     * row on a changed non-trade tick. The 5-arg form keeps the feature off.
      */
     public MultiTimeframeAggregateFunction(long liveSnapshotIntervalMs, boolean sessionBypass,
-            boolean signalContextEnabled, boolean emitLiveTick, long allowedLatenessMs) {
+            boolean signalContextEnabled, boolean emitLiveTick, long allowedLatenessMs,
+            boolean marketTickEnabled) {
         Preconditions.checkArgument(liveSnapshotIntervalMs > 0, "liveSnapshotIntervalMs must be >0");
         Preconditions.checkArgument(allowedLatenessMs >= 0, "allowedLatenessMs must be >=0");
         this.liveSnapshotIntervalMs = liveSnapshotIntervalMs;
@@ -215,6 +230,14 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         this.signalContextEnabled = signalContextEnabled;
         this.emitLiveTick = emitLiveTick;
         this.allowedLatenessMs = allowedLatenessMs;
+        this.marketTickEnabled = marketTickEnabled;
+    }
+
+    /** 5-arg form: the market-tick row is off (pre-CHG-505 behavior). */
+    public MultiTimeframeAggregateFunction(long liveSnapshotIntervalMs, boolean sessionBypass,
+            boolean signalContextEnabled, boolean emitLiveTick, long allowedLatenessMs) {
+        this(liveSnapshotIntervalMs, sessionBypass, signalContextEnabled, emitLiveTick,
+                allowedLatenessMs, false);
     }
 
     @Override
@@ -232,6 +255,8 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             liveEmittedCounter = getRuntimeContext().getMetricGroup().counter("compute.candles.live.emitted");
             liveTickEmittedCounter =
                     getRuntimeContext().getMetricGroup().counter("compute.candles.live.tick.emitted");
+            marketTickEmittedCounter =
+                    getRuntimeContext().getMetricGroup().counter("compute.market.tick.emitted");
         } catch (Exception ignored) {
             // harness may not provide metrics
         }
@@ -371,6 +396,44 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         setNullableLong(row, CandleLiveColumns.MKT_DEPTH_CHANGED_AT, m.depthChangedAt);
     }
 
+    /**
+     * Market-only row (2026-10-02, CHG-505): a {@link CandleLiveColumns} layout
+     * with {@code TF="MKT"} — identity and the 44-column market section are
+     * meaningful; the candle prefix is type-defaults (0 / event time), never
+     * read on a market row and never persisted. Transport only.
+     */
+    private static GenericRowData buildMarketRow(long token, RowData tick,
+            MultiTimeframeState state) {
+        long eventTime = tick.getLong(RawTableColumns.EVENT_TIME);
+        GenericRowData row = new GenericRowData(CandleLiveColumns.FIELD_COUNT);
+        row.setField(CandleLiveColumns.INSTRUMENT_TOKEN, token);
+        row.setField(CandleLiveColumns.EXCHANGE,
+                tick.isNullAt(RawTableColumns.EXCHANGE) ? null
+                        : StringData.fromString(tick.getString(RawTableColumns.EXCHANGE).toString()));
+        row.setField(CandleLiveColumns.SYMBOL,
+                tick.isNullAt(RawTableColumns.SYMBOL) ? null
+                        : StringData.fromString(tick.getString(RawTableColumns.SYMBOL).toString()));
+        row.setField(CandleLiveColumns.TF, StringData.fromString(CandleLiveColumns.TF_MARKET_TICK));
+        // The layout's candle prefix is NOT NULL by construction; a market row
+        // carries no candle, so the prefix is zero-defaulted (never read) and
+        // only the event time is real. Nulls here would depend on the side
+        // output's serializer tolerating null in a NOT NULL field.
+        row.setField(CandleLiveColumns.WINDOW_START, eventTime);
+        row.setField(CandleLiveColumns.WINDOW_END, eventTime);
+        row.setField(CandleLiveColumns.OPEN_PAISE, 0L);
+        row.setField(CandleLiveColumns.HIGH_PAISE, 0L);
+        row.setField(CandleLiveColumns.LOW_PAISE, 0L);
+        row.setField(CandleLiveColumns.CLOSE_PAISE, 0L);
+        row.setField(CandleLiveColumns.VOLUME, 0L);
+        row.setField(CandleLiveColumns.TICK_COUNT, 0);
+        row.setField(CandleLiveColumns.LAST_EVENT_TIME, eventTime);
+        row.setField(CandleLiveColumns.SCHEMA_VERSION,
+                StringData.fromString(CandleLiveColumns.SCHEMA_VERSION_V1));
+        row.setField(CandleLiveColumns.INGEST_TS, 0L);
+        writeMarketSection(row, state.market);
+        return row;
+    }
+
     /** BIGINT NULL transport helper: 0 means "not yet seen" (the row carries NULL). */
     private static void setNullableLong(GenericRowData row, int index, long value) {
         if (value == 0L) {
@@ -396,8 +459,13 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
      * repeating the same book leaves both clocks alone — the age a strategy
      * reads is "time since this group last moved". A field that is 0 on the
      * wire follows the 0 = unknown convention and never moves a clock.
+     *
+     * @return true when any stats or depth value actually changed (the same
+     *     booleans that stamp the two clocks) — the market-tick trigger
+     *     (CHG-505) reuses this exact result, so the trigger and the state
+     *     can never disagree.
      */
-    private static void updateMarketSnapshot(MultiTimeframeState state, RowData tick, long eventTime) {
+    private static boolean updateMarketSnapshot(MultiTimeframeState state, RowData tick, long eventTime) {
         MarketSnapshot m = state.market;
         boolean statsChanged = false;
         boolean depthChanged = false;
@@ -539,6 +607,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         if (depthChanged) {
             m.depthChangedAt = eventTime;
         }
+        return statsChanged || depthChanged;
     }
 
     /** NULL means "this tick does not carry the field": keep the stored value. */
@@ -615,7 +684,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         // Strategy market snapshot (2026-10-01): capture the raw extras every
         // forming row carries — BOTH trade and quote ticks update it; only
         // accepted trades emit rows (the quote branch below returns).
-        updateMarketSnapshot(slot.state, tick, eventTime);
+        boolean snapshotChanged = updateMarketSnapshot(slot.state, tick, eventTime);
 
         if (!isTrade) {
             // Quote-only / zero-qty TRADE: quote snapshot side, but never OHLC.
@@ -625,6 +694,19 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             // was designed to fold. Quote ticks still emit no signal.
             if (!tick.isNullAt(RawTableColumns.EVENT_FINGERPRINT)) {
                 slot.state.lastFingerprint = tick.getString(RawTableColumns.EVENT_FINGERPRINT).toString();
+            }
+            // 2026-10-02 (CHG-505): a non-trade tick that actually changed the
+            // snapshot hands the strategy host a market-only row on the same
+            // fast side output (TF="MKT", identity + market section + clocks),
+            // so a book/stat rule can be evaluated at tick latency without
+            // waiting for a trade. The trigger reuses the exact change result
+            // that stamps the two clocks — state and trigger cannot disagree.
+            // No new state, no timers, one row per real change.
+            if (marketTickEnabled && emitLiveTick && snapshotChanged) {
+                ctx.output(LIVE_TICK_TAG, buildMarketRow(key, tick, slot.state));
+                if (marketTickEmittedCounter != null) {
+                    marketTickEmittedCounter.inc();
+                }
             }
             // W3-d: quotes drive the operator-scope live-mirror scan too — the
             // 1s mirror cadence must survive a trade pause (quotes never touch OHLC).

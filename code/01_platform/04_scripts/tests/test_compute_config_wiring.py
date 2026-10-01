@@ -37,8 +37,9 @@ def test_aggregator_has_the_field_and_the_canonical_constructor():
         "the aggregator must carry the configured tolerance as a field"
     assert re.search(
         r"public MultiTimeframeAggregateFunction\(long liveSnapshotIntervalMs, boolean sessionBypass,\s*"
-        r"boolean signalContextEnabled, boolean emitLiveTick, long allowedLatenessMs\)", text), \
-        "the 5-arg canonical constructor is missing"
+        r"boolean signalContextEnabled, boolean emitLiveTick, long allowedLatenessMs,\s*"
+        r"boolean marketTickEnabled\)", text), \
+        "the 6-arg canonical constructor (CHG-505 adds marketTickEnabled) is missing"
     assert "allowedLatenessMs must be >=0" in text, \
         "a negative tolerance must be refused at construction"
 
