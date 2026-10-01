@@ -1,7 +1,7 @@
 # Single end-to-end stage profiler — native latency + throughput (full universe)
 
 **Created:** 2026-09-25 · **Rev 3** (single-test restructure; supersedes Rev 2's two-change
-split) · **Status:** DRAFT — awaiting operator approval · root `AGENTS.md` wave discipline.
+split) · **Status:** LANDED — CHG-314 (2026-09-26; native stage profiler at `code/01_platform/06_stage_profiler/`, smoke + 900 s full-universe run green). **(Updated 2026-10-01)** · root `AGENTS.md` wave discipline.
 
 ## 1. The ask — one test
 

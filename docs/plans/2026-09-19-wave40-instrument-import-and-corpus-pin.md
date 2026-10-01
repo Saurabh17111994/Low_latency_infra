@@ -6,8 +6,8 @@
 - Findings: P6-010, P6-110, P6-111, P6-112, P6-113, P6-114, P6-115, P6-417, P6-418,
   P6-419, P6-420, P6-421, P6-422, P6-423, P6-424, P6-746, P6-747 (import) ·
   P6-060, P6-061, P6-349 (corpus pin)
-- Status: verification complete (read-only, 2026-09-19); implementation staged while the
-  certifying gate for `f2faf565` runs, applied after its verdict.
+- Status: landed — CHG-228 (corpus pin) + CHG-229 (`import_instruments.sh` retirement), 2026-09-19;
+  verification complete (read-only, 2026-09-19). **(Updated 2026-10-01)**
 
 ## 0. Verdict summary
 

@@ -182,7 +182,7 @@ Compliance acceptance SHALL include: object-lock enforcement on a test prefix, l
 - TLS is required for broker, S3, observability, and cross-host production traffic where supported; unencrypted cross-host secrets or money-moving data are prohibited.
 - Data at rest is encrypted for Fluss volumes, S3 checkpoints, lake/audit, secrets, and Executor state.
 - Local development uses ignored `.env`; production uses Docker Swarm secrets.
-- Least-privilege identities separate ingestion, Flink, Action Capture, Executor, observability, and operators.
+- Least-privilege identities separate ingestion, Flink, the Execution Core (capture + executor — the legacy Action Capture service was retired 2026-09-10), observability, and operators.
 - Logs/traces redact credentials, tokens, raw payloads, and unnecessary account identifiers.
 - Audit access is role-restricted and itself audited.
 - Credential rotation/revocation, unauthorized resume, secret exposure, and expired-token scenarios are tested and alerted.

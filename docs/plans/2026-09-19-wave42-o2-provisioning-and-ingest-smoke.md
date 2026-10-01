@@ -4,8 +4,7 @@
 - Findings: P6-428, P6-748 (reconcile-compare.py) · P6-457, P6-458 (local_int_004_smoke.py) ·
   P6-459, P6-460, P6-461, P6-757, P6-758, P6-759 (o2-provision.py) · P6-462, P6-760 (o2_ingest.py) ·
   P6-572, P6-791, P6-792 (stage_capture_parse.py)
-- Status: verification complete (read-only, 2026-09-19); implementation staged while the certifying
-  gate for `f2faf565` runs, applied after its verdict.
+- Status: landed — CHG-230, 2026-09-19; verification complete (read-only, 2026-09-19). **(Updated 2026-10-01)**
 
 ## 0. Verdict summary
 

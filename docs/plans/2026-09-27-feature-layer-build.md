@@ -1,6 +1,6 @@
 # Feature layer build — DEC-056 + DEC-057
 
-- Status: in progress (slice 1).
+- Status: landed — S1–S4 shipped as CHG-347…CHG-351 (2026-09-27/28); the stored feature layer was retired by Wave C (DEC-059: W-C4 `5533ec2a`, decommission W-C5a/CHG-482, 2026-09-30). **(Updated 2026-10-01)**
 - Decisions: DEC-056 (shared in-process registry, one stored row per window), DEC-057
   (storage encoding `MAP<INT,DOUBLE>`, append-only ids).
 - Evidence: storage spike `logs/feature-spike-20260927/REPORT.md` (CHG-345); latency baseline

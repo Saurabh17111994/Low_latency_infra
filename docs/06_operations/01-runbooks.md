@@ -470,11 +470,12 @@ Environment: the distributed SignalJob runs on the compose Flink cluster as a
 | `CHECKPOINT_TIMEOUT_MS` | `30000` | checkpoint timeout |
 | `MAX_CONCURRENT_CHECKPOINTS` | `1` | no concurrent checkpoints |
 
-Additional required envs: `RAW_TABLE`, `CANDLE_LIVE_TABLE`, `CANDLE_CLOSED_TABLE`,
+Additional envs: `RAW_TABLE`, `MERGED_CANDLE_TABLE`, `CANDLE_CONTEXT_TABLE`,
 `SIGNAL_CANDIDATES_TABLE`, `SIGNAL_CURRENT_TABLE`, `FLUSS_BOOTSTRAP_SERVERS` (coordinator port `9123` —
 the tablet's client port is `9124` and `9123` on a tablet is nothing),
 `CHECKPOINT_DIR` (MUST include a scheme: `file:///tmp/p8-checkpoints`; a bare
 path throws `StringIndexOutOfBoundsException` at `SignalJob.java:310`).
+**(Updated 2026-10-01: `CANDLE_LIVE_TABLE`/`CANDLE_CLOSED_TABLE` are retired — the legacy candle tables were dropped in Wave C W-C7 (CHG-481) and the pre-cutover names are no longer read; `SignalJobConfig.java:218,224` reads `MERGED_CANDLE_TABLE` (default `candle_features`) and `CANDLE_CONTEXT_TABLE`.)**
 **RETIRED (candle-era, 2026-09-05 multi-timeframe cutover) — early-signal / preview path envs.**
 The job no longer reads any of these keys (verified by literal census of
 `SignalJobConfig.java`: zero `EARLY_SIGNAL_*`/`PREVIEW_*`/`FORMING_BAR_TABLE` reads):
@@ -498,7 +499,7 @@ snapshots in `candle_features` (DDL 35, DEC-059); the authoritative env surface 
    `/opt/flink/jobs/compute.jar`).
 2. Copy the jar into the jobmanager container if rebuilt.
 3. Submit with the pinned env set (exact working dev command):
-   `docker exec -e RAW_TABLE=… -e CANDLE_TABLE=… -e SIGNAL_CANDIDATES_TABLE=… -e SIGNAL_CURRENT_TABLE=… -e STATE_RECOVERY_PATH=… -e CHECKPOINT_DIR=file:///tmp/p8-checkpoints -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 -e DEDUP_TTL_MS=60000 -e CANDLE_WINDOW_MS=15000 -e CHECKPOINT_INTERVAL_MS=10000 -e CHECKPOINT_TIMEOUT_MS=30000 -e MAX_CONCURRENT_CHECKPOINTS=1 01_docker-flink-jobmanager-1 flink run -d -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar`
+   `docker exec -e RAW_TABLE=… -e MERGED_CANDLE_TABLE=… -e CANDLE_CONTEXT_TABLE=… -e SIGNAL_CANDIDATES_TABLE=… -e SIGNAL_CURRENT_TABLE=… -e STATE_RECOVERY_PATH=… -e CHECKPOINT_DIR=file:///tmp/p8-checkpoints -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 -e DEDUP_TTL_MS=60000 -e CANDLE_WINDOW_MS=15000 -e CHECKPOINT_INTERVAL_MS=10000 -e CHECKPOINT_TIMEOUT_MS=30000 -e MAX_CONCURRENT_CHECKPOINTS=1 01_docker-flink-jobmanager-1 flink run -d -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar`
    (This is the normal RESTORE-mode command: `STATE_RECOVERY_PATH` names the
    previous run's last checkpoint and `ALLOW_FULL_REPLAY` is absent; the log
    line `signal-job: startup mode = RESTORE (restore=…, fullReplay=false)` at

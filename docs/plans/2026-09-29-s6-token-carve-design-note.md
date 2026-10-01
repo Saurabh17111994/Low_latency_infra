@@ -1,7 +1,6 @@
-# S6 design note — H2-4 per-slot token carve (verified-first, implementation not started)
+# S6 design note — H2-4 per-slot token carve (verified-first; implemented in CHG-381)
 
-- **Status:** recon complete, verified read-only against the tree on `f5c304dd` (2026-09-29).
-  Implementation has **not** started; this note is the resume point.
+- **Status:** implemented — recon complete, verified read-only against the tree on `f5c304dd` (2026-09-29); **CHG-381** (2026-09-29) landed the per-slot `assigned_token_set_hash` comparison. This note remains the recon record. **(Updated 2026-10-01)**
 - **Source:** H2-4 in `docs/plans/2026-09-28-high-findings-remediation.md` (design §H2-4, verdict
   table line 180) and slice S6 in `docs/plans/2026-09-29-h2-m4-scope.md` §2.
 - **Operator decisions (already recorded):** warn-only per contract; the shared fixture is

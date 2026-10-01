@@ -86,9 +86,9 @@ Fluss metadata, tablet data, and replication configuration SHALL be version-pinn
 | `Signal_Candidates_current` | KV                                    | Business Logic              | Current-state projection, PK `(instrument_token)`; latest/active candidate per instrument, supersession overwrites in place |
 | `Ranking_Results`           | ~~LOG~~                                   | ~~Signal job ranking operator~~ | ~~Immutable score/selection audit~~ — **REMOVED 2026-08-15 (CHG-005)** |
 | `Trade_Decisions`           | ~~LOG (DECIDED)~~                         | ~~Signal job~~                  | ~~Immutable instructions~~ — **REMOVED 2026-08-15 (CHG-005)** |
-| `Order_Lifecycle`           | KV                                    | Action Capture              | Broker-order lifecycle projection            |
+| `Order_Lifecycle`           | KV                                    | Execution Core (capture path; legacy Action Capture retired 2026-09-10) | Broker-order lifecycle projection            |
 | `Positions`                 | KV                                    | Fill-derived projector      | Position lifecycle aggregate                 |
-| `Fills`               | LOG                                   | Action Capture              | Immutable postback/fill audit                |
+| `Fills`               | LOG                                   | Execution Core (capture path; legacy Action Capture retired 2026-09-10) | Immutable postback/fill audit                |
 | `Order_Correlation`         | KV                                    | Executor                    | Three-ID and attempt mappings                |
 | `Execution_Gate`            | KV                                    | Executor                    | Gate state and approvals                     |
 | `Execution_Attempts`        | KV                                    | Executor                    | Attempt state and request hash               |

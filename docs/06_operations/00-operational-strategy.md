@@ -31,7 +31,7 @@ Services may start concurrently. Readiness is dependency-driven, not determined 
 3. Verify Flink control/workers and encrypted checkpoint storage.
 4. Deploy the Signal and Babysitter Flink jobs from pinned artifacts; confirm running and checkpointing.
 5. Verify Ingestion protocol/decoder compatibility, instrument manifest, required subscriptions, append acknowledgements, clock offset, and telemetry.
-6. Verify Action Capture postback schema/protocol, correlation dependencies, projection readiness, and telemetry.
+6. Verify the Execution Core capture-path postback schema/protocol, correlation dependencies, projection readiness, and telemetry (the standalone Action Capture service was retired 2026-09-10).
 7. Start Executor with gate `HALTED`; verify durable execution state, identity mappings, changelog continuity, Arrow REST contract/readiness, fencing, and telemetry.
 8. Reconcile broker orders, fills, positions, attempts, and incomplete projections. (**Reservations REMOVED 2026-08-15, CHG-005.**)
 9. Require the single-operator (Saurabh, DEC-044) authenticated approval of the same gate epoch/evidence hash before `ENABLED`.
@@ -48,7 +48,7 @@ Use the health dimensions and dashboard/alert definitions in [`../08_implementat
 | --- | --- | --- |
 | Market ingress | Ingestion | Preserve raw packets, bounded memory, protocol/quarantine evidence |
 | Stream compute | Signal job | Dedup, event-time candles, forming bars (**ranking/instructions REMOVED 2026-08-15, CHG-005**) |
-| Postbacks | Action Capture | Preserve evidence, correlate, project lifecycle/positions, quarantine ambiguity |
+| Postbacks | Execution Core (capture path; legacy Action Capture retired 2026-09-10) | Preserve evidence, correlate, project lifecycle/positions, quarantine ambiguity |
 | Position observation | Babysitter | Consume `Positions`; emit zero actions in MVP |
 | Money-moving calls | Executor | Enforce gate, attempts, mappings, reconciliation, fencing |
 | Storage durability | Platform/Storage | Quorum, replication, checkpoints, EOD manifest, retention gate |

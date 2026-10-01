@@ -170,7 +170,7 @@ provisioning runs — `docs/05_deployment/CLOUDPE_DAILY_VM.md` §3.
 - Fluss writes lock at 0.85 (~779 GB used) and recover below 0.80 (~733 GB);
   the 2026-09-25 reading was 70-75% used — one busy week reaches the lock.
 - Retention today: `candle_features` 3 d, `raw_table_1`
-  9 d (`table.log.ttl` and `table.auto-partition.num-retention`).
+  3 d (`table.log.ttl` and `table.auto-partition.num-retention`). **(Updated 2026-10-01: `raw_table_1` retention was cut 9 d → 3 d on 2026-09-30 — Wave A/A2, CHG-487; `ddl/02_raw_table_1.sql` sets `table.log.ttl='3d'` and `auto-partition.num-retention=3`.)**
 - **Open action (operator):** measure one real week's growth before changing
   retention — `node_filesystem_avail_bytes` is already scraped into O2, so the
   number is a query, not a guess. The 2026-09-28 record lists raw day partitions

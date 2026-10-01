@@ -88,7 +88,7 @@ The previous single-axis status vocabulary (`Draft`, `Design-ready`, `Implementa
 | Broker protocols | Design-ready | Implemented (error half VERIFIED: TOTP `execution-auth-001` len 238 + re-auth `reauth.go` + Arrow REST error 401/UNKNOWN/duplicate — `a1-*`/`a4-*`; success half `RCF-EQ ×1` live place proven 2026-08-25 `26082501010305` — sandbox margin shortfall ₹10500) | Tested-in-sandbox (error half) | Blocked |
 | DDL/schema | Design-ready | Implemented (25 tables, `ddl_sha256` + `compatibility_class`, composite-PK matrix, 25/25 live on dev Fluss; 26→27 on 2026-09-27 when DDL 34 `feature_values` joined — CHG-349; 27→28 on 2026-09-30 when DDL 35 `candle_features` joined — Wave B/DEC-059, CHG-468; 28→25 on 2026-09-30 when Wave C W-C5a retired `candle_live`/`candle_closed`/`feature_values` — DEC-059, CHG-482) | Tested-in-sandbox (`compat-fluss-*` + matrix verifier + live DDL drills) | Blocked |
 | Ingestion | Design-ready | Implemented (285 ingestion + 489 common tests; losslessness + 1800 s soak proven) | Tested-in-sandbox (10,716 rows fake→Fluss, 49k tps synthetic envelope, `full-audit` C6 `489/285/419`) | Blocked |
-| Signal job | Design-ready | Implemented (multi-timeframe candles 15 s–15 m (`32_candle_live`/`33_candle_closed`) + strategy host `n7-range-breakout-v1` + optional `Execution_Intent`, behind rollout flags; `SIG-FAIL-001` ckpt-failure; the 15 s candle era is retired — see `04-signal-job.md`) | Tested-in-sandbox (envelope + `make gate`/`full-audit` green) | Blocked |
+| Signal job | Design-ready | Implemented (multi-timeframe candles 15 s–15 m in the merged `candle_features` (DDL 35; the legacy `candle_live`/`candle_closed` tables were dropped in Wave C W-C7 — CHG-481) + strategy host `n7-range-breakout-v1` + optional `Execution_Intent`, behind rollout flags; `SIG-FAIL-001` ckpt-failure; the 15 s candle era is retired — see `04-signal-job.md`) **(Updated 2026-10-01)** | Tested-in-sandbox (envelope + `make gate`/`full-audit` green) | Blocked |
 | Execution Core (Babysitter + Executor — Nautilus + go-arrow bridge, 2026-08-21) | Design-ready (re-scoped CHG-028) | Implemented (WP-0..8 DONE: `LiveNodeRuntime` 1800 s soak B1, crash fence B2, gate lifecycle B3, durable 4 clients B7, clock drift B8; multi-conn C1..C4 synthetic `48,660 tps`; T9 `RCF-EQ ×1` live order proven to Arrow 2026-08-25 — `MARGIN ERROR`, sandbox unfunded) | Tested-in-sandbox (196 Rust lib + 18.7 s/1.12 s Go + 247 Java; `make gate` 13/13 on 2026-08-25, standing certificate 19/19 since 2026-09-23) | Blocked |
 | Local runtime | Design-ready | Implemented (`t8` 12/12 + `execution_network_check` PASS on `--profile execution-t3`; Swarm duties on holder) | Tested-in-sandbox | Blocked |
 | Production runtime | Design-ready | Not-implemented (needs prod VMs D1 — `BLOCKED: needs prod VMs`) | Untested (`PERF-PROD-60000`/`FAIL-VM-LOSS`/`DR-001..006`/`D7` await prod stack) | Blocked |
@@ -191,7 +191,7 @@ Read these **in order** before writing any code:
 1. Go `arrow-bridge` (Arrow Go SDK → stdout **proto frames, T6 primary**; NDJSON via `TRANSPORT=pipe` rollback) pipes into Java `IngestionService` (sniff → validate → fingerprint → Fluss `raw_table_1` writer)
 2. Reconnect loop with exponential backoff (epoch bump on reconnect)
 3. Per-tick append latency tracking
-4. Backpressure: stop accepting at `MAX_PENDING_APPEND_RECORDS` (50k) / `MAX_PENDING_APPEND_BYTES` (64MB)
+4. Backpressure: stop accepting at `MAX_PENDING_APPEND_RECORDS` (150k) / `MAX_PENDING_APPEND_BYTES` (192 MiB) **(Updated 2026-10-01: the 50k/64 MiB values were the 1k-era defaults; the current defaults are 150k/192 MiB for the 3k envelope — `IngestionConfig.java:34-35`, `MAX_PENDING_RECORDS`/`MAX_PENDING_BYTES`)**
 5. Readiness probe: returns not-ready when backpressured
 
 **Acceptance tests:** `FAIL-PENDING-001`, `STATE-DEDUP-001`
@@ -200,7 +200,7 @@ Read these **in order** before writing any code:
 
 ### Phase 3: Signal Job 🔴 NEXT
 
-- > Head start: Slice 1 (raw source → validation → dedup → candles) is implemented with 25 green tests and live-smoke-verified 2026-08-09 (205,146 candles, 1,074 instruments, 48 checkpoints); see [`04-signal-job.md`](./04-signal-job.md) §Slice 1 evidence. The 15 s candle era it landed on is retired (2026-09-05); the current candle tables are `32_candle_live`/`33_candle_closed` (multi-timeframe 15 s–15 m). The slot-scoped safety consumer shell (`SafetyHaltJob` + `SafetyStateTracker` + `SuppressionGate` in `common`) is also implemented and live-verified — SAFETY-INT-001 passed 2026-08-09. Remaining: forming-bar handoff + Business Logic (Slice 2). ~~Ranking/Reservations/Decisions (Slice 3)~~ — **REMOVED 2026-08-15 (CHG-005, not deferred).**
+- > Head start: Slice 1 (raw source → validation → dedup → candles) is implemented with 25 green tests and live-smoke-verified 2026-08-09 (205,146 candles, 1,074 instruments, 48 checkpoints); see [`04-signal-job.md`](./04-signal-job.md) §Slice 1 evidence. The 15 s candle era it landed on is retired (2026-09-05); the current candle table is the merged `candle_features` (DDL 35; multi-timeframe 15 s–15 m — Wave C W-C7 dropped the legacy `candle_live`/`candle_closed`, CHG-481) **(Updated 2026-10-01)**. The slot-scoped safety consumer shell (`SafetyHaltJob` + `SafetyStateTracker` + `SuppressionGate` in `common`) is also implemented and live-verified — SAFETY-INT-001 passed 2026-08-09. Remaining: forming-bar handoff + Business Logic (Slice 2). ~~Ranking/Reservations/Decisions (Slice 3)~~ — **REMOVED 2026-08-15 (CHG-005, not deferred).**
 
 Read these **in order** before writing any code:
 
@@ -210,7 +210,7 @@ Read these **in order** before writing any code:
 | **Contract** | [`../04_contracts/04-business-logic.md`](../04_contracts/04-business-logic.md) | Feature compute, candidate detection, filtering rules |
 | **Contract** | [`../04_contracts/10-ranking.md`](../04_contracts/10-ranking.md) | **REMOVED 2026-08-15 (CHG-005 — in-operator ranking out of scope, not deferred); stub retained for cross-reference** |
 | **Dossier** | [`04-signal-job.md`](./04-signal-job.md) | How to build — state layout, dedup, candle (**ranking/reservation/decisions REMOVED 2026-08-15, CHG-005**) |
-| **DDL** | `code/01_platform/02_sql/ddl/32_candle_live.sql`, `33_candle_closed.sql`, `05_signal_candidates.sql` (**`06_ranking_results.sql`, `07_trade_decisions.sql`, `15_portfolio_reservations.sql` REMOVED from scope 2026-08-15, CHG-005 — DDL files retained as reserved schema: still in `schema_manifest.json` and applied by the 2026-08-24 scratch run, but never written by any job**) | Physical schemas |
+| **DDL** | `code/01_platform/02_sql/ddl/35_candle_features.sql`, `05_signal_candidates.sql` (**`06_ranking_results.sql`, `07_trade_decisions.sql`, `15_portfolio_reservations.sql` REMOVED from scope 2026-08-15, CHG-005 — DDL files retained as reserved schema: still in `schema_manifest.json` and applied by the 2026-08-24 scratch run, but never written by any job**) **(Updated 2026-10-01: `candle_features` is the single candle table — `32_candle_live.sql`/`33_candle_closed.sql` were retired and removed with the Wave C merged cutover (W-C5a, CHG-482; DEC-059); the files no longer exist under `ddl/`)** | Physical schemas |
 
 **What to build (in-order, inside one Flink job):**
 
@@ -218,7 +218,7 @@ Read these **in order** before writing any code:
 2. Candidate detection: feature state → `SignalCandidate` (max 1 active per instrument)
 3. ~~Ranking: in-operator, deterministic tie-break, rejection codes~~ — **REMOVED 2026-08-15 (CHG-005)**
 4. ~~Reservation: portfolio capacity check → `ReservationState`~~ — **REMOVED 2026-08-15 (CHG-005)**
-5. Decision publish: write `TradeDecisions` to Fluss changelog
+5. ~~Decision publish: write `TradeDecisions` to Fluss changelog~~ — **REMOVED 2026-08-15 (CHG-005 — decisions out of scope, not deferred)**
 
 **Acceptance tests:** `STATE-CANDLE-001`, `STATE-DEDUP-001` (at Flink level), perf tests
 

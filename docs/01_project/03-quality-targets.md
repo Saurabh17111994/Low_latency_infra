@@ -71,8 +71,8 @@ An Arrow REST request without a verified response after **15 seconds** SHALL bec
 ```text
 HALTED
   → RECONCILING(evidence_hash, epoch)
-  → APPROVAL_PENDING(first_approver)
-  → ENABLED(second_distinct_approver)
+  → APPROVAL_PENDING(operator)
+  → ENABLED(single authenticated operator approval — `saurabh`; DEC-044: a second distinct approval is **not required and not checked**)
   → HALTED(reason, detected_at, next_epoch)
 ```
 
@@ -90,7 +90,7 @@ Executor auto-resume after a restart is permitted **only** when durable evidence
 4. No unresolved order correlations (every `client_order_ref` has a verified `broker_order_id` mapping)
 5. Healthy changelog continuity (no gaps, valid consumer position)
 6. Healthy Signal-job/checkpoint evidence (recent successful checkpoint, no state corruption)
-7. Fresh mandatory health signals (Signal job, Action Capture, Ingestion all report healthy)
+7. Fresh mandatory health signals (Signal job, Ingestion, and the Execution Core capture path all report healthy) **(Updated 2026-10-01: the standalone `03_action_capture` service was retired 2026-09-10 — capture runs in the Execution Core.)**
 
 If ANY proof is missing, the Executor remains `HALTED`. Reconciliation and the existing approved-resume path apply. Executor auto-resume SHALL produce an immutable audit event and OpenObserve notification including the evidence hash and every check performed. Do not leave conflicting active text that "every restart requires single-operator (Saurabh, DEC-044) approval" alongside this conditional rule — auto-resume is permitted only with complete proof; without it, the single-operator (Saurabh, DEC-044) approval path applies.
 

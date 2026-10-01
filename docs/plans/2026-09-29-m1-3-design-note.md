@@ -1,6 +1,6 @@
 # M1-3 design note — one shared report flow (`BridgeSession`)
 
-- **Status:** design settled 2026-09-29 (post-recon); implementation pending. Source:
+- **Status:** implemented — design settled 2026-09-29 (post-recon); landed as CHG-389/CHG-390/CHG-391 (2026-09-29; one `BridgeSession`, route+node wiring, drop accounting). Source:
   `docs/plans/2026-09-28-medium-findings-remediation.md` M1-3 (E3); audit row "second dial /
   lost route fill"; recon report `ses_f165a3e71ffeoDy05aK3eJDDVf` (line anchors updated below).
 - **Non-negotiables:** one `take_reports` dispatcher owns the single WS subscription; route-owned

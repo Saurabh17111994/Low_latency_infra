@@ -20,8 +20,8 @@ unless a command says otherwise.
 
 | Action | Command | What it does |
 |---|---|---|
-| Start everything (full stack + trading trio) | `make up --profile execution-t3` | Brings up all 18 services incl. gateway/bridge/nautilus. The execution trio (`execution-bridge`, `execution-gateway`, `nautilus`) is profile-gated, so plain `make up` does **not** start the trading path (port 9190). |
-| Start data pipeline only | `make up` | 12 long-running services, no execution trio |
+| Start everything (full stack + trading trio) | `make up --profile execution-t3` | Brings up all 20 non-loadgen services (21 defined; the `loadgen` profile stays off) incl. gateway/bridge/nautilus. The execution trio (`execution-bridge`, `execution-gateway`, `nautilus`) is profile-gated, so plain `make up` does **not** start the trading path (port 9190). **(Updated 2026-10-01: service counts refreshed to the current `docker-compose.yml` — 21 defined.)** |
+| Start data pipeline only | `make up` | 13 long-running services (of 21 defined; 4 one-shot, 4 profile-gated), no execution trio |
 | Stop everything | `make down` | `docker compose down` — stops all containers |
 | Stop + wipe data/volumes | `make clean` | `docker compose down -v` |
 | Build all service images | `make build` | Maven-packages ingestion |

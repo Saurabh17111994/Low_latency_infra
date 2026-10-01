@@ -184,6 +184,10 @@ rows above, so the reasoning stays auditable.
   `runtime.lock` keeps its current job unchanged (base-image pins + `pin-check`), and no new
   lock-writing script is introduced. Supersedes the `runtime.lock` phrasing in this section, §4
   Phase 1 (files, step 6, acceptance), §6 verification item 1, and §9.1 stages 1–2.
+  **(Updated 2026-10-01: `runtime.lock:25-26` no longer holds base-image pins — CHG-306 flipped
+  `FLUSS_IMAGE`/`FLINK_IMAGE` to the 1.0-built wrapper digests (`trading-fluss-runtime:prod@sha256:e1bf98e6…`,
+  `trading-flink-runtime:prod@sha256:70b04617…`), the same values published in `images.published.env`;
+  the carrier statement above still stands and `runtime.lock` remains the tracked pin-check lock.)**
 - **D3's first commit is `workflow_dispatch` only; the `v*` tag trigger is a follow-up.** A
   tag-triggered run checks out a tag, so committing the fragment from there would have to push to the
   default branch — which either rewinds `main` or is rejected as a non-fast-forward — and a publish

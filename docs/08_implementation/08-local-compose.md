@@ -158,7 +158,7 @@ Stop new simulated money-moving calls, record gate state, drain/reconcile test a
 
 ### Implementation status — 2026-08-24 (offline CAN closed, Swarm/live blocked)
 
-> Single-VM laptop (`make up` 12 long-running containers of 18 compose services — 3 `execution-t3` profile-gated, 2 one-shot, `minio-init` exit; `fluss-coordinator:9123` reachable) closes every `Partially` row offline. `L8` `PERF-NODELOSS` `S3` `replication.factor=3` remain `4VM` blocked; `ARROW-REST` remains market blocked.
+> Single-VM laptop (`make up` 13 long-running containers of 21 compose services — 3 `execution-t3` profile-gated + 1 `loadgen` profile, 4 one-shot `ddl-apply`/`eod-controller`/`compute`/`minio-init`; counts refreshed 2026-10-01; `fluss-coordinator:9123` reachable) closes every `Partially` row offline. `L8` `PERF-NODELOSS` `S3` `replication.factor=3` remain `4VM` blocked; `ARROW-REST` remains market blocked.
 
 | Layer | Tests | Done offline `2026-08-24` (evidence) | Still needs live/4VM |
 |---|---|---|---|

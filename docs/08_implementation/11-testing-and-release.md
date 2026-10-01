@@ -699,7 +699,7 @@ CI must fail for:
 |---|---|---|---|
 | T0 | `make gate-fast` (add `MODULE=<module>` to also run that module's suite) | every change: `make ddl`, static checks, the R2/parity audit suite, pin discipline, fast image staleness, doc↔code truth (C1–C16) | no live drills, no DDL apply smoke, no full doc audit; prints `GATE-FAST RESULT: subset green` — never a certificate |
 | T1 | one targeted suite: `cd code && mvn -o test -pl <module>` — for a live drill class add `-Pdrill-reports -Dtest=<Class> -Dsurefire.failIfNoSpecifiedTests=false` and `FLUSS_BOOTSTRAP=localhost:9123`. Gateway classes need the reactor form `-pl common,02_services/06_execution_gateway`. | narrowing one failure T0 exposed, and re-verifying exactly that fix | one class/suite; says nothing about the rest of the module |
-| T3 | `make gate` — the 19 steps | per batch, and the **only** run that certifies | ~51 min, clean tree required, cluster must be free |
+| T3 | `make gate` — the 19 steps | per batch, and the **only** run that certifies | ~23–25 min **(Updated 2026-10-01: measured certifying runs 23–25 min — `logs/soak/monday-gates-20261001-171407` 17:14→17:37 and `…-012918` 01:29→01:54; the earlier ~51 min figure predates the gate optimization, CHG-302)**, clean tree required, cluster must be free |
 
 Escalate T0 → T1 → T3. A failure mode counts as cross-class only once two
 independent targeted runs disagree; otherwise one class is the right scope.

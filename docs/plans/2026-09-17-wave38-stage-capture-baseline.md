@@ -1,6 +1,6 @@
 # Wave 38 — Stage capture and baseline — implementation plan
 
-- **Status:** approved 2026-09-17, queued behind the running gate sweep
+- **Status:** landed — Wave 38 commits 1–7 shipped as CHG-205…CHG-211 (2026-09-17). **(Updated 2026-10-01)**
 - **Source:** audit `p6-ops-scripts-tests-chaos-audit.md` Wave 38 (23 findings, 2 ticked, 21 open)
 - **Scope verification:** all 21 open findings reproduced byte-for-byte against
   main's tree 2026-09-17 (read-only); 0 stale, 0 unclear. Both ticks

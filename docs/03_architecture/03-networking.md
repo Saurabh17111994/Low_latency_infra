@@ -10,8 +10,11 @@ For the offline execution-bridge profile, Compose adds an internal `execution-ne
 gateway/Nautilus/bridge traffic and a separate `arrow-egress` network. Only the Go order-path
 bridge joins `arrow-egress`; it has no published host port. The policy is checked against the
 resolved Compose model by `code/01_platform/04_scripts/execution_network_check.py`. Runtime
-cross-container route probes are deferred to T8 because the gateway and Rust service are not yet
-deployed. The existing ingestion service remains a separately documented market-data Arrow
+cross-container route probes ran under the offline `execution-t3` profile (2026-08-21 WP-6) and on
+the live single-VM stack (2026-08-24) — `execution-gateway` (`docker-compose.yml:1058`) and the Rust
+service `nautilus` (`docker-compose.yml:1089`) are deployed there, profile-gated with zero host
+ports (cross-container probes: `nautilus:9190/healthz` `HALTED`, `gateway:9180/healthz` 200 on both
+nets; `t8_sandbox_contract_check.py` 12/12 PASS). The existing ingestion service remains a separately documented market-data Arrow
 exception and is not an order-path execution service.
 
 ### Production

@@ -245,7 +245,7 @@ Verified: 2026-09-29 - runtime.lock:26 pins ghcr.io/saurabh17111994/trading-flin
 Check: grep -q 'FLINK_IMAGE=ghcr.io/saurabh17111994/trading-flink-runtime:prod@sha256:' code/01_platform/01_docker/runtime.lock
 Recheck when: the Flink image re-pins, or runtime.lock stops naming the pushed wrapper
 Claim: FLINK_IMAGE=ghcr.io/saurabh17111994/trading-flink-runtime:prod@sha256:70b04617bea29ea927d4e4daec4366854af7ed497a6a14ca2fa08bfd487d96b3
-The pin moved from the stock flink:2.2.1 digest to the 1.0-built wrapper after the 2026-09-23 publish; the digest is a pushed GHCR manifest, not a local image ID. Supersedes FACT-009 (built locally before the push).
+The pin moved from the stock flink:2.2.1 digest to the 1.0-built wrapper after the 2026-09-23 publish; the digest is a pushed GHCR manifest, not a local image ID. **(Updated 2026-10-01: provenance — the committed source fragment is publish run `35875331208` / source-commit `2e7993ec5566` (`images.published.env:2`; CHG-306), not T9.2's earlier run `35770015626` / fragment `e2590815`.)** Supersedes FACT-009 (built locally before the push).
 
 ### FACT-020: FLUSS_IMAGE pins the pushed trading-fluss-runtime:prod digest
 Status: LIVE
@@ -253,7 +253,7 @@ Verified: 2026-09-29 - runtime.lock:25 pins ghcr.io/saurabh17111994/trading-flus
 Check: grep -q 'FLUSS_IMAGE=ghcr.io/saurabh17111994/trading-fluss-runtime:prod@sha256:' code/01_platform/01_docker/runtime.lock
 Recheck when: the Fluss image re-pins, or runtime.lock stops naming the pushed wrapper
 Claim: FLUSS_IMAGE=ghcr.io/saurabh17111994/trading-fluss-runtime:prod@sha256:e1bf98e6c58514641f1baa75c9f62534c64b7eb2e811a53b333c1ca007d52645
-The derived image (fluss-fs-s3 + fluss-fs-hdfs baked into plugins/iceberg/) is pushed and pinned, so the classloader gap FACT-014 recorded is closed at the pin level; whether a real tiering job writes parquet is still unproven (needs the Flink tiering service + a table with table.datalake.enabled). Supersedes FACT-014 (still names the stock digest).
+The derived image (fluss-fs-s3 + fluss-fs-hdfs baked into plugins/iceberg/) is pushed and pinned, so the classloader gap FACT-014 recorded is closed at the pin level; whether a real tiering job writes parquet is still unproven (needs the Flink tiering service + a table with table.datalake.enabled). **(Updated 2026-10-01: provenance — the pinned digest comes from publish run `35875331208` / source-commit `2e7993ec5566` (`images.published.env:2`; CHG-306), not T9.2's earlier run `35770015626` / fragment `e2590815`.)** Supersedes FACT-014 (still names the stock digest).
 
 ### FACT-021: this PC is a one-node Swarm and this host is its Leader
 Status: LIVE

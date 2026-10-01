@@ -151,7 +151,7 @@ must expose their degraded reason and bounded buffering state.
 
 ### Component-specific degradation
 
-Ingestion and Action Capture may continue bounded evidence capture only when
+Ingestion and the Execution Core capture path (legacy Action Capture retired 2026-09-10) may continue bounded evidence capture only when
 durable source/audit writes, local buffering, and readiness policy remain
 healthy. The Executor must halt new money-moving calls when mandatory execution
 audit, safety-control acknowledgement, or alert visibility is unavailable.
