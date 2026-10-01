@@ -1,6 +1,7 @@
 # Audit HIGH-findings remediation — 2026-10-01 full-project audit
 
-**Created:** 2026-10-01 · **Status:** in progress — Batch 1 (docs truth) landed; Batches 2–4 open.
+**Created:** 2026-10-01 · **Status:** in progress — Batches 1–2 landed (CHG-495/496); Batch 3–4
+open; H1 awaits the operator push decision.
 **Source:** full-project audit 2026-10-01 (read-only; four domain auditors + a repo-hygiene
 pass). Findings H1–H13 as reported to the operator; operator approved the batch plan.
 
@@ -13,9 +14,9 @@ pass). Findings H1–H13 as reported to the operator; operator approved the batc
 | H3 | 20+ dossier evidence paths missing from disk | 4 | open |
 | H4 | two `logs/tracker-14/` files are 68-byte placeholders cited as proof | 4 | open |
 | H5 | CHG-055 absent; its cited commits are unreachable objects | 4 | open |
-| H6 | `run-ingestion-full.sh` runs the retired HFT feed (no `ARROW_FEED`) | 2 | open |
-| H7 | soak overlay hardcodes `/home/saurabh/...` manifest source | 2 | open |
-| H8 | gate-forced `ManifestLoadTest` hardcodes `/home/saurabh/...` | 2 | open |
+| H6 | `run-ingestion-full.sh` runs the retired HFT feed (no `ARROW_FEED`) | 2 | landed CHG-496 |
+| H7 | soak overlay hardcodes `/home/saurabh/...` manifest source | 2 | landed CHG-496 |
+| H8 | gate-forced `ManifestLoadTest` hardcodes `/home/saurabh/...` | 2 | landed CHG-496 |
 | H9 | daily-VM guide lacks a firewall/tunnel step; 9 ports on 0.0.0.0 | 3 | open |
 | H10 | requirements presented the retired single-TF/forming-bar design as current | 1 | landed CHG-495 |
 | H11 | architecture said Executor → Arrow REST directly; showed retired action-capture | 1 | landed CHG-495 |

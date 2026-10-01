@@ -38,9 +38,18 @@ class ManifestLoadTest {
                 System.getenv().getOrDefault("INGESTION_INT_TEST_MANIFEST", "false")),
                 "Skipping — set INGESTION_INT_TEST_MANIFEST=true");
 
-        InstrumentManifestLoader.ManifestResult result = InstrumentManifestLoader.loadFromPath(
+        // 2026-10-01 (audit H8): env override + existence guard — the Monday gate
+        // forces this test on, and it must not require the dev PC's directory.
+        String manifestPath = System.getenv().getOrDefault(
+                "INGESTION_TEST_MANIFEST_PATH",
                 "/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/"
                         + "Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv");
+        assumeTrue(java.nio.file.Files.exists(java.nio.file.Path.of(manifestPath)),
+                "Real NSE manifest not present at " + manifestPath
+                        + " — set INGESTION_TEST_MANIFEST_PATH");
+
+        InstrumentManifestLoader.ManifestResult result =
+                InstrumentManifestLoader.loadFromPath(manifestPath);
 
         assertTrue(result.approved(), "manifest should be approved");
         assertEquals(1, result.version());
@@ -133,8 +142,11 @@ class ManifestLoadTest {
     @Test
     @DisplayName("Real quoted 1024-manifest file loads 1024 instruments")
     void loadsRealQuotedManifest() {
-        String path = "/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/"
-                + "Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv";
+        // 2026-10-01 (audit H8): same env-override pattern as loadProductionManifest.
+        String path = System.getenv().getOrDefault(
+                "INGESTION_TEST_MANIFEST_1024_PATH",
+                "/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/"
+                        + "Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv");
         if (!java.nio.file.Files.exists(java.nio.file.Path.of(path))) {
             assumeTrue(false, "Real quoted manifest not present on this machine");
         }

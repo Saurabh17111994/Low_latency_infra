@@ -69,6 +69,10 @@ fi
 : "${ARROW_TOTP_KEY:?ARROW_TOTP_KEY must be set (ARROW_TOKEN removed 2026-08-24, TOTP only)}"
 # Export Arrow credentials to the Java child process.
 export ARROW_APP_ID ARROW_APP_SECRET ARROW_USER_ID ARROW_PASSWORD ARROW_TOTP_KEY
+# 2026-10-01 (audit H6): the Go bridge defaults to the HFT feed, which the broker
+# has rejected since 2026-09-24 (PLAN_NOT_SUBSCRIBED); the standard token stream
+# is the working feed. Default like compose (docker-compose.yml: ARROW_FEED: token).
+export ARROW_FEED="${ARROW_FEED:-token}"
 
 # ---- Environment (local Fluss; keep localhost:9123) -------------------------
 export FLUSS_BOOTSTRAP="${FLUSS_BOOTSTRAP:-localhost:9123}"

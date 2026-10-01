@@ -79,6 +79,8 @@ services:
       # 757614) — replaces the base compose mount of the full NSE file so the
       # fake tick token passes manifest validation.
       - type: bind
-        source: /home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv
+        # 2026-10-01 (audit H7): SOAK_MANIFEST_PATH overrides the dev-PC default;
+        # the fallback stays for the dev workflow only.
+        source: ${SOAK_MANIFEST_PATH:-/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv}
         target: /instruments/NSE_CM_EQUITY.csv
         read_only: true
