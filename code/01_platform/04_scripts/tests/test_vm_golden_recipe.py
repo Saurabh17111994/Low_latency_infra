@@ -88,6 +88,28 @@ class VmGoldenRecipeTests(unittest.TestCase):
         self.assertIn("three approved dev sockets", text)
         self.assertIn("CHG-320", text)
 
+    def test_profile_enables_the_candle_and_strategy_chain(self):
+        """A fresh VM must not silently boot with candles/signals off.
+
+        The compose defaults are `MULTITF_ENABLED=false` and empty/false for
+        the strategy flags, and the daily profile is what makes a fresh VM
+        need no flags — but `.env.example` (the `.env` the golden build
+        copies) carries none of them. Without these pins the day writes no
+        candles (the EOD's `EOD_TABLES=candle_features` archives nothing) and
+        runs no strategies; the dev `.env` calls out the same silent-off
+        contract (2026-09-27 turn-on, Q3(a)).
+        """
+        text = VM_ENV.read_text()
+        for pinned in (
+            "MULTITF_ENABLED=true",
+            "STRATEGY_HOST_ENABLED=true",
+            "STRATEGIES=n7-range-breakout-v1",
+            "EXECUTION_INTENT_ENABLED=true",
+        ):
+            self.assertRegex(text, r"(?m)^" + re.escape(pinned) + r"$",
+                             f"the daily VM profile must pin {pinned} "
+                             "(compose defaults are false/empty)")
+
     def test_guide_repeats_the_daily_universe(self):
         text = DOC.read_text()
         self.assertIn("2433", text)

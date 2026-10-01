@@ -54,7 +54,7 @@ What it does — and does not do:
 |---|---|
 | installs Docker + compose plugin (if missing), python3 + tzdata for the host scheduler, and enables Docker | start the stack |
 | writes `.env` from `.env.example` with the real R2 endpoint/bucket/warehouse | write any secret |
-| writes `.env.vm` from `.env.vm.example` (fresh start, dev+full universe (2433 tokens, 3 sockets), 15:45 EOD, compose runner, stop gate, live DataStream channel via `ARROW_FEED=token`) | run the EOD |
+| writes `.env.vm` from `.env.vm.example` (fresh start, dev+full universe (2433 tokens, 3 sockets), multi-TF candles + strategy host (`n7-range-breakout-v1`) + execution intents (full dev parity, CHG-492), 15:45 EOD, compose runner, stop gate, live DataStream channel via `ARROW_FEED=token`) | run the EOD |
 | installs + enables the `trading-eod` systemd unit | change the code |
 
 The script warns when the project image set is missing; that is what §2.4 loads. `--check`
