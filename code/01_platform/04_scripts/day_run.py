@@ -83,6 +83,14 @@ CHECKPOINT_INTERVAL_MS = 10_000  # compose pin (CHECKPOINT_INTERVAL_MS)
 DEFAULT_READY_TIMEOUT_S = 3600
 FLINK_JOBMANAGER = "flink-jobmanager"
 EXECUTION_SERVICES = ("execution-bridge", "execution-gateway", "nautilus")
+# CHG-509: off-hours drill override. The board judges the data predicates I3/I4
+# only inside the session (D5); an explicit DAY_SESSION_OVERRIDE=open lets an
+# operator judge a fed pipeline during an off-hours drill. Dev-only (refused in
+# production) and loud: the session line reads FORCED-OPEN (drill: ...) and the
+# verdict carries a DRILL prefix. It never changes the default pre-session
+# PENDING and never rubber-stamps stalled data.
+SESSION_OVERRIDE_ENV = "DAY_SESSION_OVERRIDE"
+SESSION_OVERRIDE_OPEN = "open"
 
 # I8 error-budget vocabulary (ingestion + cluster logs; messages from
 # IngestionService / the bridge wrapper).
@@ -372,14 +380,26 @@ def _completed_checkpoint_ms(payload: dict) -> int | None:
     return None
 
 
+def session_override() -> str:
+    """CHG-509: the normalized DAY_SESSION_OVERRIDE value ('' when unset)."""
+    return os.environ.get(SESSION_OVERRIDE_ENV, "").strip().lower()
+
+
 def session_now(now: dt.datetime | None = None) -> dict:
     now = now.astimezone(IST) if now else dt.datetime.now(IST)
     minutes = now.hour * 60 + now.minute
     open_now = now.weekday() < 5 and (9 * 60 + 15) <= minutes <= (15 * 60 + 30)
+    # CHG-509: the drill override is applied only after preflight validated it
+    # (dev-only, exact value 'open'); an unknown value never forces the session.
+    forced = session_override() == SESSION_OVERRIDE_OPEN
+    label = (f"FORCED-OPEN (drill: {SESSION_OVERRIDE_ENV}={SESSION_OVERRIDE_OPEN}) "
+             f"({now:%H:%M} IST)" if forced
+             else f"{'OPEN' if open_now else 'CLOSED'} ({now:%H:%M} IST)")
     return {
-        "open": open_now,
-        "label": f"{'OPEN' if open_now else 'CLOSED'} ({now:%H:%M} IST)",
+        "open": open_now or forced,
+        "label": label,
         "date": now.strftime("%Y-%m-%d"),
+        "forced": forced,
     }
 
 
@@ -603,15 +623,17 @@ def render(checks: list, facts: Facts, universe: dict | None = None) -> str:
             lines.append(f"[day]                            recovery: {check.recovery}")
     reds = [c for c in checks if not c.ok and not c.pending]
     pendings = [c for c in checks if c.pending]
+    # CHG-509: an off-hours drill run is marked loudly wherever the verdict is.
+    drill = "DRILL " if facts.session.get("forced") else ""
     lines.append(f"[day] session     INFO  market={facts.session.get('label', 'unknown')}")
     if reds:
-        lines.append(f"[day] verdict     RED exit=1 · first failing invariant: "
+        lines.append(f"[day] verdict     {drill}RED exit=1 · first failing invariant: "
                      f"{reds[0].ident} ({reds[0].label})")
     elif pendings:
-        lines.append(f"[day] verdict     PENDING {len(checks) - len(pendings)}/"
+        lines.append(f"[day] verdict     {drill}PENDING {len(checks) - len(pendings)}/"
                      f"{len(checks)} invariants · data predicates judged in session")
     else:
-        lines.append(f"[day] verdict     GREEN {len(checks)}/{len(checks)} invariants "
+        lines.append(f"[day] verdict     {drill}GREEN {len(checks)}/{len(checks)} invariants "
                      f"· next: make day ARGS=\"status\"")
     return "\n".join(lines)
 
@@ -991,8 +1013,25 @@ class Collector:
 # --------------------------------------------------------------------------
 
 
+def _validate_session_override(deploy_env: str) -> None:
+    """CHG-509: the drill override is dev-only and accepts exactly 'open'."""
+    override = session_override()
+    if not override:
+        return
+    if override != SESSION_OVERRIDE_OPEN:
+        raise Refusal(
+            f"{SESSION_OVERRIDE_ENV} accepts only '{SESSION_OVERRIDE_OPEN}' "
+            f"(the off-hours drill value) or unset; got '{override}'")
+    if deploy_env.strip().lower() in {"prod", "production"}:
+        raise Refusal(
+            f"{SESSION_OVERRIDE_ENV}={SESSION_OVERRIDE_OPEN} is a dev drill; "
+            f"DEPLOYMENT_ENV={deploy_env} refuses it — production judges the "
+            "real session (D5)")
+
+
 def preflight(guard_posture: bool = True) -> Universe:
     deploy_env = effective_value("DEPLOYMENT_ENV", effective_value("DEPLOY_ENV", "dev"))
+    _validate_session_override(deploy_env)
     mode = effective_value("UNIVERSE", DEFAULT_UNIVERSE)
     counts = {
         "full": count_manifest_rows(FULL_MANIFEST) if FULL_MANIFEST.exists() else 0,

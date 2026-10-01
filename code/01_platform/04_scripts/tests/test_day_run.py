@@ -11,6 +11,7 @@ Auto-discovered by gate step 3 (``test_*.py``, pytest from the repo root).
 """
 
 import dataclasses
+import datetime as dt
 import importlib.util
 import io
 import json
@@ -409,6 +410,81 @@ class EvaluateTests(unittest.TestCase):
         i7 = next(c for c in checks if c.ident == "I7")
         self.assertFalse(i7.ok, "an unread manifest window must not pass I7")
         self.assertIn("unverified", i7.detail)
+
+
+class SessionDrillTests(unittest.TestCase):
+    """CHG-509: the explicit off-hours drill override.
+
+    The board judges I3/I4 only inside the session (D5). During an off-hours
+    drill a fed pipeline can still be judged with ``DAY_SESSION_OVERRIDE=open``:
+    dev-only, loud ``FORCED-OPEN (drill)`` label + ``DRILL`` verdict prefix,
+    and it never changes the default pre-session PENDING or rubber-stamps
+    stalled data."""
+
+    OFF_SESSION = dt.datetime(2026, 10, 2, 1, 50, tzinfo=day_run.IST)
+    FORCED = {"open": True,
+              "label": "FORCED-OPEN (drill: DAY_SESSION_OVERRIDE=open) (01:50 IST)",
+              "forced": True}
+
+    def test_override_forces_open_off_session(self):
+        with mock.patch.dict(os.environ, {"DAY_SESSION_OVERRIDE": "open"}):
+            session = day_run.session_now(now=self.OFF_SESSION)
+        self.assertTrue(session["open"])
+        self.assertTrue(session["forced"])
+        self.assertIn("FORCED-OPEN", session["label"])
+        self.assertIn("DAY_SESSION_OVERRIDE", session["label"])
+
+    def test_without_override_off_session_is_closed(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("DAY_SESSION_OVERRIDE", None)
+            session = day_run.session_now(now=self.OFF_SESSION)
+        self.assertFalse(session["open"])
+        self.assertFalse(session["forced"])
+
+    def test_invalid_override_never_forces(self):
+        # Fail-closed: an unknown value never opens the session; preflight
+        # refuses the run instead (tested below).
+        with mock.patch.dict(os.environ, {"DAY_SESSION_OVERRIDE": "yes"}):
+            session = day_run.session_now(now=self.OFF_SESSION)
+        self.assertFalse(session["open"])
+        self.assertFalse(session["forced"])
+
+    def test_bad_value_refused(self):
+        with mock.patch.dict(os.environ, {"DAY_SESSION_OVERRIDE": "yes"}):
+            with self.assertRaises(day_run.Refusal) as ctx:
+                day_run._validate_session_override("dev")
+        self.assertIn("DAY_SESSION_OVERRIDE", str(ctx.exception))
+
+    def test_production_refused(self):
+        with mock.patch.dict(os.environ, {"DAY_SESSION_OVERRIDE": "open"}):
+            with self.assertRaises(day_run.Refusal) as ctx:
+                day_run._validate_session_override("production")
+        self.assertIn("dev drill", str(ctx.exception))
+
+    def test_drill_session_judges_data_predicates(self):
+        facts = make_facts(session=self.FORCED)
+        checks = day_run.evaluate(facts)
+        self.assertTrue(all(c.ok and not c.pending for c in checks), checks)
+        board = day_run.render(checks, facts)
+        self.assertIn("DRILL", board)
+        self.assertIn("GREEN 9/9", board)
+
+    def test_drill_session_still_fails_on_stalled_data(self):
+        # The drill judges the predicates; it must not rubber-stamp them.
+        facts = make_facts(
+            session=self.FORCED,
+            fluss={"raw": {"ok": True, "log_end": 1, "delta": 0},
+                   "candles": {"ok": True, "log_end": 1, "delta": 0},
+                   "signals": {"ok": True, "log_end": 1, "delta": 0},
+                   "window_s": 20})
+        checks = day_run.evaluate(facts)
+        reds = [c.ident for c in checks if not c.ok and not c.pending]
+        self.assertEqual(reds, ["I3", "I4"])
+        self.assertIn("DRILL", day_run.render(checks, facts))
+
+    def test_normal_session_render_has_no_drill_marker(self):
+        facts = make_facts()
+        self.assertNotIn("DRILL", day_run.render(day_run.evaluate(facts), facts))
 
 
 # --------------------------------------------------------------------------

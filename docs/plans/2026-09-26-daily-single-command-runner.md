@@ -69,7 +69,11 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
 - [x] **D4** — Daily actions: **`start`/`status`/`stop` only**; savepoint stays
   an explicit command; EOD stays with the `eod-controller` service.
 - [x] **D5** — Success bar: **nine checks I1–I9; pre-session data checks report
-  PENDING, exit 0**.
+  PENDING, exit 0**. Amended 2026-10-02 (CHG-509): an explicit dev-only
+  `DAY_SESSION_OVERRIDE=open` drill override judges I3/I4 against a
+  deliberately fed off-hours pipeline (loud `FORCED-OPEN (drill)` label +
+  `DRILL` verdict; refused in production). The default off-session PENDING is
+  unchanged, and stalled deltas still fail.
 - [x] **D6** — Interface: **`make day ARGS="..."` + `day-run.sh`**.
 
 #### P1 — Platform start-safety (no decision needed)
@@ -370,8 +374,11 @@ Failure shape (fail-closed, actionable):
 Pure decision functions (unit-testable) + thin read-only probes
 (compose/Flink REST/pipeline-lib). The data predicate is session-aware: inside
 09:15–15:30 IST it must see movement within a bounded window; outside it
-reports PENDING (D5). Every failure names the invariant and the native recovery
-action from the runbook.
+reports PENDING (D5). An explicit dev-only `DAY_SESSION_OVERRIDE=open`
+(CHG-509) forces the predicates to be judged during a fed off-hours drill; the
+board marks the run `FORCED-OPEN (drill)` + `DRILL`, and production refuses the
+override. Every failure names the invariant and the native recovery action from
+the runbook.
 
 ### 3.5 Rejected approaches
 

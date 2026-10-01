@@ -126,6 +126,14 @@ make day ARGS="stop"      # graceful stop; checkpoints/volumes preserved
   4 = another writer holds the stack lock. `make` reports a red board as exit
   2. Off-session (outside Mon-Fri 09:15-15:30 IST) the data predicates I3/I4
   report PENDING and do not fail the run — Monday in-session is authoritative.
+- **Off-hours drill (CHG-509).** `DAY_SESSION_OVERRIDE=open` (dev-only) makes
+  the board judge I3/I4 against a deliberately fed pipeline off-hours: the
+  session line reads `FORCED-OPEN (drill: DAY_SESSION_OVERRIDE=open)` and the
+  verdict is prefixed `DRILL`. Any other value is refused, production refuses
+  the override, and stalled deltas still go RED — pair it with a fed pipeline
+  (`MULTITF_SESSION_BYPASS=true make rollout-savepoint` plus the fake-broker
+  loadtest), never with an idle stack. Normal runs are unchanged: off-session
+  PENDING, Monday in-session authoritative.
 - **Evidence.** Every run writes `logs/day/<timestamp>-<verb>/board.txt` and
   `facts.json`.
 
