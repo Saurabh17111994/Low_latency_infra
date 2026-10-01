@@ -39,6 +39,29 @@ public final class SmaComputer implements FeatureComputer {
         next = (next + 1) % ring.length;
     }
 
+    /**
+     * The SMA as if the forming candle closed now (2026-10-01): the forming
+     * close enters the window and, once full, the oldest close rolls out. Pure
+     * arithmetic — the closed state is untouched. NaN until the window would be
+     * full counting the forming candle.
+     */
+    @Override
+    public double previewOnForming(
+            long openPaise,
+            long highPaise,
+            long lowPaise,
+            long closePaise,
+            long volume,
+            long tickCount) {
+        if (count == ring.length) {
+            return (sum - ring[next] + closePaise) / ring.length;
+        }
+        if (count + 1 == ring.length) {
+            return (sum + closePaise) / ring.length;
+        }
+        return Double.NaN;
+    }
+
     @Override
     public double value() {
         return count < ring.length ? Double.NaN : sum / ring.length;

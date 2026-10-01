@@ -51,6 +51,41 @@ public final class RsiComputer implements FeatureComputer {
         }
     }
 
+    /**
+     * The RSI as if the forming candle closed now (2026-10-01): one Wilder
+     * step from the current averages using the forming close, with the same
+     * seeding rule. Pure arithmetic — the closed state is untouched.
+     */
+    @Override
+    public double previewOnForming(
+            long openPaise,
+            long highPaise,
+            long lowPaise,
+            long closePaise,
+            long volume,
+            long tickCount) {
+        if (lastClose == Long.MIN_VALUE || changes + 1 < period) {
+            return Double.NaN; // not ready even with the forming close counted
+        }
+        double change = closePaise - lastClose;
+        double gain = Math.max(change, 0.0);
+        double loss = Math.max(-change, 0.0);
+        double nextGain;
+        double nextLoss;
+        if (changes + 1 <= period) {
+            nextGain = avgGain + gain / period;
+            nextLoss = avgLoss + loss / period;
+        } else {
+            nextGain = (avgGain * (period - 1) + gain) / period;
+            nextLoss = (avgLoss * (period - 1) + loss) / period;
+        }
+        if (nextLoss == 0.0) {
+            return 100.0;
+        }
+        double rs = nextGain / nextLoss;
+        return 100.0 - 100.0 / (1.0 + rs);
+    }
+
     @Override
     public double value() {
         if (changes < period) {

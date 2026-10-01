@@ -20,6 +20,7 @@ import org.apache.flink.table.data.StringData;
 import org.apache.flink.util.Collector;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -300,6 +301,48 @@ class StrategyHostFeaturesTest {
     }
 
     @Test
+    @DisplayName("2026-10-01: a strategy reads per-TF features evolving with the forming candle")
+    void strategySeesPerTimeframeFeaturesEvolveWithTheFormingCandle() throws Exception {
+        open(FeatureProbe.RULE_ID);
+        // 19 closed 1 m candles: the closed SMA(20) is one close short.
+        for (int i = 1; i <= 19; i++) {
+            harness.processElement2(
+                    closed(TOKEN, Timeframe.ONE_M.code(), i * 60_000L, i * 100L, 10L, 2), 1_000L + i);
+        }
+        assertTrue(
+                Double.isNaN(function.featuresForTest(TOKEN).latest(1, Timeframe.ONE_M)),
+                "19 closes → the closed SMA(20) is not ready");
+
+        // Forming 1 m candle (window 20): every tick moves the live SMA (the
+        // value as if the candle closed now) while the closed view stays put.
+        harness.processElement1(live(TOKEN, Timeframe.ONE_M, 1_200_000L, 2_000L, 20L, 3), 1_200_100L);
+        assertEquals(1_050.0, probe().lastSmaOneMinuteLive, 1e-9, "(19000 + 2000) / 20");
+        harness.processElement1(live(TOKEN, Timeframe.ONE_M, 1_200_000L, 3_000L, 25L, 4), 1_200_200L);
+        assertEquals(1_100.0, probe().lastSmaOneMinuteLive, 1e-9, "(19000 + 3000) / 20");
+        assertTrue(
+                Double.isNaN(function.featuresForTest(TOKEN).latest(1, Timeframe.ONE_M)),
+                "the closed view must not move while the candle is forming");
+
+        // The window closes: live and closed views agree (no double count).
+        harness.processElement2(
+                closed(TOKEN, Timeframe.ONE_M.code(), 1_200_000L, 3_000L, 25L, 4), 1_200_300L);
+        assertEquals(1_100.0, function.featuresForTest(TOKEN).latest(1, Timeframe.ONE_M), 1e-9);
+        assertEquals(
+                1_100.0,
+                function.featuresForTest(TOKEN).latestLive(1, Timeframe.ONE_M),
+                1e-9,
+                "after the close the live accessor falls back to the closed value");
+
+        // The next forming candle previews with the oldest close evicted.
+        harness.processElement1(live(TOKEN, Timeframe.ONE_M, 1_260_000L, 4_000L, 5L, 1), 1_260_100L);
+        assertEquals(
+                1_295.0,
+                function.featuresForTest(TOKEN).latestLive(1, Timeframe.ONE_M),
+                1e-9,
+                "(22000 - 100 + 4000) / 20 — the oldest close rolls out");
+    }
+
+    @Test
     void legacyTwoArgumentStrategiesKeepWorking() throws Exception {
         open(LegacyProbe.RULE_ID);
         harness.processElement1(live(TOKEN, Timeframe.FIFTEEN_S, 0L, 500L, 10L, 1), 1_000L);
@@ -364,6 +407,7 @@ class StrategyHostFeaturesTest {
         int closeCalls;
         double lastPrice = Double.NaN;
         double lastSmaOneMinute = Double.NaN;
+        double lastSmaOneMinuteLive = Double.NaN;
         FeatureView lastView;
 
         @Override
@@ -382,6 +426,7 @@ class StrategyHostFeaturesTest {
             liveCalls++;
             lastView = features;
             lastPrice = features.latest("last_price", Timeframe.FIFTEEN_S);
+            lastSmaOneMinuteLive = features.latestLive("sma_close_20", Timeframe.ONE_M);
         }
 
         @Override

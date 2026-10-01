@@ -16,6 +16,12 @@ import java.util.Map;
  * computer per instrument, and the same value appears in every declared
  * timeframe's snapshot.
  *
+ * <p><b>Forming view (2026-10-01).</b> The host feeds the evolving candle of
+ * every timeframe ({@link #onFormingCandle}) once per accepted tick, and
+ * {@link #latestLive(int, Timeframe)} previews a CLOSE feature as if that
+ * candle closed now. The preview is pure arithmetic over the closed state —
+ * nothing is stored and the closed values never change because of it.
+ *
  * <p>Everything is allocated here, once, at strategy-host slot creation. The
  * update methods are O(active features) with no allocation, boxing, or
  * collection growth — they run on the tick path (48k ticks/s at the HFT
@@ -28,6 +34,16 @@ public final class PerInstrumentFeatures implements FeatureView {
     private final double[][] closeLatest;
     private final FeatureComputer[] tickComputers;
     private final FeatureComputer[][] closeComputers;
+    /** Evolving candle per timeframe (2026-10-01): heap-only, never stored. */
+    private final long[] formingWindowStart;
+    private final long[] formingOpen;
+    private final long[] formingHigh;
+    private final long[] formingLow;
+    private final long[] formingClose;
+    private final long[] formingVolume;
+    private final long[] formingTicks;
+    /** Newest closed window per timeframe; a forming row previews only above it. */
+    private final long[] lastClosedWindowStart;
 
     public PerInstrumentFeatures() {
         int size = FeatureRegistry.SIZE;
@@ -37,7 +53,17 @@ public final class PerInstrumentFeatures implements FeatureView {
         this.closeLatest = new double[size][];
         this.tickComputers = new FeatureComputer[size];
         this.closeComputers = new FeatureComputer[size][];
+        this.formingWindowStart = new long[tfCount];
+        this.formingOpen = new long[tfCount];
+        this.formingHigh = new long[tfCount];
+        this.formingLow = new long[tfCount];
+        this.formingClose = new long[tfCount];
+        this.formingVolume = new long[tfCount];
+        this.formingTicks = new long[tfCount];
+        this.lastClosedWindowStart = new long[tfCount];
         Arrays.fill(tickLatest, Double.NaN);
+        Arrays.fill(formingWindowStart, Long.MIN_VALUE);
+        Arrays.fill(lastClosedWindowStart, Long.MIN_VALUE);
         for (FeatureDef def : FeatureRegistry.all()) {
             if (def.status() != FeatureStatus.ACTIVE) {
                 continue; // retired: no computer, never updated, never stored
@@ -81,6 +107,64 @@ public final class PerInstrumentFeatures implements FeatureView {
         }
     }
 
+    /**
+     * Record one timeframe's evolving candle (2026-10-01): called once per
+     * forming row the host receives — every timeframe, every accepted tick on
+     * the fast feed. Heap-only and allocation-free; these values feed
+     * {@link #latestLive(int, Timeframe)} and are never stored.
+     */
+    public void onFormingCandle(
+            Timeframe tf,
+            long windowStart,
+            long openPaise,
+            long highPaise,
+            long lowPaise,
+            long closePaise,
+            long volume,
+            long tickCount) {
+        int ord = tf.ordinal();
+        formingWindowStart[ord] = windowStart;
+        formingOpen[ord] = openPaise;
+        formingHigh[ord] = highPaise;
+        formingLow[ord] = lowPaise;
+        formingClose[ord] = closePaise;
+        formingVolume[ord] = volume;
+        formingTicks[ord] = tickCount;
+    }
+
+    /**
+     * Evolving value of {@code featureId} for {@code tf} (2026-10-01): TICK
+     * features are already live; a CLOSE feature previews as if the current
+     * forming candle closed now, falling back to the closed value when no
+     * forming candle is newer than the last closed window (or the feature is
+     * not declared for the timeframe). Pure read — never mutates closed state.
+     */
+    @Override
+    public double latestLive(int featureId, Timeframe tf) {
+        FeatureDef def = FeatureRegistry.byId(featureId); // bounds check
+        if (def.status() != FeatureStatus.ACTIVE) {
+            return Double.NaN; // retired features are never computed
+        }
+        if (isTick[featureId]) {
+            return tickLatest[featureId];
+        }
+        int ord = tf.ordinal();
+        FeatureComputer computer = closeComputers[featureId][ord];
+        if (computer == null) {
+            return Double.NaN; // the feature is not declared for this timeframe
+        }
+        if (formingWindowStart[ord] <= lastClosedWindowStart[ord]) {
+            return closeLatest[featureId][ord]; // no current forming candle
+        }
+        return computer.previewOnForming(
+                formingOpen[ord],
+                formingHigh[ord],
+                formingLow[ord],
+                formingClose[ord],
+                formingVolume[ord],
+                formingTicks[ord]);
+    }
+
     /** Feed a closed candle to the CLOSE features declared for that timeframe. */
     public void onClosedCandle(
             Timeframe tf,
@@ -98,6 +182,12 @@ public final class PerInstrumentFeatures implements FeatureView {
                     windowStart, windowEnd, openPaise, highPaise, lowPaise,
                     closePaise, volume, tickCount);
             closeLatest[id][tf.ordinal()] = computer.value();
+        }
+        // A forming row previews only above the newest closed window, so a
+        // forming candle that just closed is never counted twice.
+        int ord = tf.ordinal();
+        if (windowStart > lastClosedWindowStart[ord]) {
+            lastClosedWindowStart[ord] = windowStart;
         }
     }
 

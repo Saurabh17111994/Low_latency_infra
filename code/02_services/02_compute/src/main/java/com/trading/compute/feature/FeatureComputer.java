@@ -48,6 +48,22 @@ public interface FeatureComputer {
             long volume,
             long tickCount) {}
 
+    /**
+     * Value this feature would have if the timeframe's forming candle closed
+     * at its current state (2026-10-01), without mutating any closed-candle
+     * state. The default is the latest closed value; features with a
+     * closed-form preview override it. Recomputed per call and never stored.
+     */
+    default double previewOnForming(
+            long openPaise,
+            long highPaise,
+            long lowPaise,
+            long closePaise,
+            long volume,
+            long tickCount) {
+        return value();
+    }
+
     /** Latest computed value, or {@link Double#NaN} when not ready. */
     double value();
 }

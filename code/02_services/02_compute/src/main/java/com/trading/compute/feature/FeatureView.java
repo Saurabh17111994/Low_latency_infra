@@ -29,4 +29,26 @@ public interface FeatureView {
                         .id(),
                 tf);
     }
+
+    /**
+     * Evolving value of {@code featureId} for {@code tf} (2026-10-01): for a
+     * CLOSE feature the value as if the timeframe's forming candle closed at
+     * its current state, recomputed from the forming candle the host fed on the
+     * latest accepted tick; exactly {@link #latest} when no current forming
+     * candle exists or for TICK features (already live). Pure read — never
+     * mutates closed state and never lands in storage: stored rows keep the
+     * closed-candle values.
+     */
+    default double latestLive(int featureId, Timeframe tf) {
+        return latest(featureId, tf);
+    }
+
+    /** Registry-name convenience for {@link #latestLive(int, Timeframe)}. */
+    default double latestLive(String name, Timeframe tf) {
+        return latestLive(
+                FeatureRegistry.byName(name)
+                        .orElseThrow(() -> new IllegalArgumentException("unknown feature: " + name))
+                        .id(),
+                tf);
+    }
 }

@@ -678,14 +678,29 @@ public class StrategyHostFunction
     /**
      * DEC-056 feature update on the live tick. A throwing computer is counted
      * and dropped — it must never kill the subtask or block the strategy
-     * fan-out (same isolation contract as strategies themselves). L3-4: only
-     * the canonical tick timeframe updates the timeframe-independent TICK
-     * features; the other five forming rows of a fallback snapshot still fan
-     * out to strategies but do not touch them.
+     * fan-out (same isolation contract as strategies themselves). Every row
+     * records the evolving candle for its timeframe (2026-10-01) so a strategy
+     * can read any timeframe's forming features in memory; L3-4: only the
+     * canonical tick timeframe updates the timeframe-independent TICK features
+     * (the other five forming rows of a snapshot still fan out to strategies
+     * but must not touch them).
      */
     private void updateFeaturesOnTick(HostSlot slot, RowData live, long eventTimeMs) {
         try {
             Timeframe tf = Timeframe.fromCode(live.getString(CandleLiveColumns.TF).toString());
+            // 2026-10-01: every forming row (all six TFs per tick on the fast
+            // feed, all six of a snapshot on the fallback) updates the live
+            // feature view — FeatureView.latestLive previews a CLOSE feature as
+            // if this candle closed now. Heap only: no storage, no state growth.
+            slot.features.onFormingCandle(
+                    tf,
+                    live.getLong(CandleLiveColumns.WINDOW_START),
+                    live.getLong(CandleLiveColumns.OPEN_PAISE),
+                    live.getLong(CandleLiveColumns.HIGH_PAISE),
+                    live.getLong(CandleLiveColumns.LOW_PAISE),
+                    live.getLong(CandleLiveColumns.CLOSE_PAISE),
+                    live.getLong(CandleLiveColumns.VOLUME),
+                    live.getInt(CandleLiveColumns.TICK_COUNT));
             // L3-4: the MULTITF_FAST_LIVE_FEED=false fallback feeds all six TF
             // forming rows of one snapshot into this operator. TICK features are
             // timeframe-independent (one computer per instrument), so feeding every
