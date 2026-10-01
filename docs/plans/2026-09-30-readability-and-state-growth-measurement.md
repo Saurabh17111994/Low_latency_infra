@@ -348,3 +348,52 @@ Recommendation stands: **smallest TF only** if per-tick is ever enabled.
 | kv.ttl (Q14) | Fallback-only value; moot after the merge. |
 | Per-tick scope (Q23) | **Smallest TF only**, if ever enabled. |
 | Feature add/remove (Q1) | MAP + append-only registry path explained (one registry line + one pin line; `RETIRED` to remove) — **awaiting operator confirmation**. |
+
+## Wave C post-cutover round (2026-10-01) — latency + state growth
+
+**Run:** `logs/wave-c-stage-profile-20261001-065919`
+(`stage-profile.sh`: smoke 200 s presence **PASS** → main 900 s; 2 Hz x 2 433
+instruments; strategy host `n7-range-breakout-v1`; harness repair for the
+merged world in CHG-483). First attempt
+(`logs/wave-c-stage-profile-20261001-065729`) stopped at job submit on a stale
+pre-W-C5a `compute.jar` (the gate runs `mvn test`, not `package`) — rebuilt.
+
+| axis | pre-Wave-C (`wave-a-a1-main-20260930-170808`) | post-Wave-C | reading |
+|---|---|---|---|
+| S4 append ack p99 | 63 ms | 54 ms | unchanged/improved |
+| S5 ingest e2e p99 | 71 ms | 66 ms | unchanged/improved |
+| S6 raw → post-dedup p99 | 76 ms | 81 ms | same class |
+| S7/S9 worst Flink tracker p99 | 1 120 ms | 42.8 ms | improved in this round (single snapshot) |
+| S11 close → read log tail p50 | 775 ms | 710 ms | same/improved |
+| S11 close → read log tail p99 | 2 502 ms | 8 689 ms | tail spikes on FIFTEEN_S/THIRTY_S/ONE_M — finding (a) |
+| S8 close → read KV first-sight (p50/p99) | quantized 5 s poll | 511 / 1 176 ms | sealed rows readable within ~1.2 s |
+| S10 live p50, FIFTEEN_S | 756 ms | **232 ms** | per-tick fast feed |
+| S10 live p50, THIRTY_S…FIFTEEN_M | ~750 ms (every TF) | 15.8 s / 30.8 s / 89.9 s / 132.8 s / 188.9 s | **finding (b)**: no forming rows above FIFTEEN_S |
+| candle-side tablet bytes | candle_live 47.25 + candle_closed 2.85 = **50.10 MB/min** | candle_features **45.04 MB/min** | −10 % bytes, one table/writer instead of three |
+| Flink RocksDB dirs | +0.40 MB/min | +0.13 MB/min | −68 % (changelog backend differs across runs — not compared) |
+| raw_table_1 | +141.79 MB/min | +146.81 MB/min | feed-bound, unchanged |
+
+Per-TF forming churn (cumulative records over the main): FIFTEEN_S 4 534 364
+(97.2 %), THIRTY_S 72 990, ONE_M 36 495, THREE_M 12 165, FIVE_M 7 299,
+FIFTEEN_M 2 433 — i.e. the merged writer emits FIFTEEN_S forming rows per tick
+(~300 k versions/min equivalent) and every other TF **once per window at seal**.
+
+**Finding (a) — log-tail p99 ~8.7 s on the smallest TFs.** The KV first-sighting
+leg (S8) shows sealed rows readable in ~1.2 s p99, so the log-tail spikes are a
+scan-delivery tail now that the tail carries FIFTEEN_S per-tick churn
+interleaved with sealed rows. Consumers that tail the merged changelog
+(archive/EOD subscribers) inherit it — watch item, not a strategy-path issue.
+
+**Finding (b) — merged now-view coverage conflict (recorded in
+`01-foundation.md`).** Q22/Q26/Q50 require stored forming rows for all six TFs
+at ~1 Hz/key; post-cutover the strategy host (the only writer) consumes only
+`LIVE_TICK_TAG` (smallest TF, per tick) and the aggregator's all-TF `LIVE_TAG`
+snapshot stream has no consumer. Operator decision required between: (a) connect
+the snapshot stream to the host (all-TF 1 Hz now-views; ~876 k versions/min
+churn), (b) formally retire Q26 (smallest-TF-only stored now-views — state-leanest),
+(c) `MULTITF_FAST_LIVE_FEED=false` (all-TF snapshots but the in-memory strategy
+feed becomes snapshot-cadence, conflicting with Q50).
+
+Note: the p99 ≤ 75 ms per-window SLO is **not** met by any stored leg by
+construction (watermark close, Q27 — measured close→read ≈0.7–1.2 s); the
+per-tick strategy path remains the 75 ms-class leg.

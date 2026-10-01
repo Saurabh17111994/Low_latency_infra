@@ -60,6 +60,23 @@ Per the `00-start-here.md` conflict rule (`docs/08_implementation/00-start-here.
   Per the authority order (code + tests > decisions > contracts > requirements > dossiers) the code
   value stands; the six sites are corrected in the same change and `test_compute_config_doc_parity.py`
   now fails on any future divergence. `ALLOWED_LATENESS_MS` (5 s) is a different knob — unchanged.
+- **Merged now-view coverage conflict (2026-10-01, Wave C post-cutover round).** DEC-059's
+  locked decisions Q22/Q26 (`docs/plans/2026-09-30-readability-and-state-growth-measurement.md`)
+  require the merged table to keep forming rows for **all six** timeframes at ~1 Hz/key
+  ("stored forming rows (1 Hz) serve UI/external readers", Q50). Post-W-C5a the strategy host is
+  the **only** `candle_features` writer, and `SignalJob` feeds it `LIVE_TICK_TAG` (smallest TF,
+  per tick) whenever `MULTITF_FAST_LIVE_FEED=true` (default) — the aggregator's all-TF `LIVE_TAG`
+  snapshot stream now has **no consumer**. Measured 2026-10-01
+  (`logs/wave-c-stage-profile-20261001-065919`, 900 s, 2 Hz x 2 433): FIFTEEN_S forming rows are
+  fresh (p50 232 ms) but THIRTY_S..FIFTEEN_M have **no current-window row** — a fresh reader falls
+  back to the just-sealed window (p50 15.8 s / 30.8 s / 89.9 s / 132.8 s / 188.9 s vs ~750 ms for
+  every TF before the cutover). Not resolved silently: owner = operator (Q22/Q26 vs the "less
+  state growth" bar). Options: (a) connect the `LIVE_TAG` snapshot stream to the host as a live
+  input — restores all-TF 1 Hz now-views at ~3x forming-version churn (~876 k vs ~300 k
+  versions/min measured); (b) formally retire Q26 — document smallest-TF-only stored now-views
+  (state-leanest; larger-TF UI candles are seal-time); (c) `MULTITF_FAST_LIVE_FEED=false` — all-TF
+  snapshots but the in-memory strategy feed becomes snapshot-cadence (conflicts with Q50). Any
+  now-view/UI commitment for TFs above FIFTEEN_S stays blocked until this is decided.
 
 ### Fixed scope
 
