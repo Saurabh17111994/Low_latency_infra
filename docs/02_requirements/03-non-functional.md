@@ -105,7 +105,7 @@ Tests use the full 3,000-instrument production manifest, connection count, subsc
 
 | Boundary                                                           | Target                                                                    |
 | ------------------------------------------------------------------ | -------------------------------------------------------------------------:|
-| Broker packet receive → raw append acknowledgement                 | p99 <50 ms target (≤ 20 ms transport linger), evidence-gated against actual protocol/client           |
+| Broker packet receive → raw append acknowledgement                 | p99 <50 ms target (client writer linger live 1 ms, `FLUSS_WRITER_BATCH_TIMEOUT_MS`; the pre-O-2 20 ms bound is historical), evidence-gated against actual protocol/client           |
 | Trigger tick consumed by Signal job → immutable instruction commit | **p99 <100 ms** at the 50,000 ticks/s variable baseline (3,000 instruments). Single release target; internal stage timings are diagnostic only. |
 | Instruction commit → Executor receipt                              | Report p50/p95/p99; release threshold set after pinned connector baseline |
 | Arrow REST call start → verified broker response                     | Report separately; no unverified fixed SLA                                |

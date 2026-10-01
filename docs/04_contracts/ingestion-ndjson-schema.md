@@ -86,8 +86,8 @@ Contract version is integer `2` (v2.2 is an additive document revision — see V
 | `slot_id` | `string` | — | `"hft-0"` … (required) |
 | `received_ts_ms` | `int64` | epoch ms | Java-side receive time (required) |
 | `feed_sequence_local` | `int64` | — | Monotonic per-slot tick sequence starting at 1, reset per connection epoch (required). Diagnostic ordering evidence; not part of the dedup fingerprint. |
-| `feed` | `string` | — | `"hft"` (the only feed — Standard removed 2026-08-14) |
-| `mode` | `string` | — | `"ltpc"` or `"full"` (the only HFT modes — Standard feed carrying `ltp`/`quote` removed 2026-08-14) |
+| `feed` | `string` | — | `"hft"` or `"token"` — the channel that produced the row (`ARROW_FEED`); `token` is the live channel since 2026-09-24 |
+| `mode` | `string` | — | channel-dependent: HFT emits `"ltpc"`/`"full"` only; the token stream emits `"ltp"`/`"ltpc"`/`"quote"`/`"full"` (live subscription: `"full"`) |
 | `token` | `int32` | — | Arrow instrument token (bucket key for `raw_table_1`) |
 | `ltp_paise` | `int32` | paise | Last traded price (₹1 = 100 paise) |
 | `close_paise` | `int32` | paise | Previous close price |
@@ -247,7 +247,7 @@ Java hash-validates `raw_payload` against `payload_hash` and persists to `ingest
 2. **All timestamps in epoch milliseconds UTC.** Never seconds, never local time.
 3. **Depth arrays are 5-element.** `full` mode always provides 5 bids + 5 asks. `ltpc` mode may have zero-length or null arrays.
 4. **Missing/unknown fields are omitted.** JSON `omitempty` — do NOT send `0` or `null` for absent fields. Java side defaults to zero.
-5. **feed+mode disambiguate the data.** `feed=hft, mode=full` has more fields populated than `feed=hft, mode=ltpc` (HFT is the only feed — Standard removed 2026-08-14).
+5. **feed+mode disambiguate the data.** `feed=token, mode=full` carries the 5-level book (~1 Hz) where `feed=token, mode=ltp` carries price only, and `feed=hft, mode=full` (196 B) is richer than `feed=hft, mode=ltpc` (40 B). The live channel is `token` (since 2026-09-24); HFT stays selectable.
 6. **No duplicate ticks assumed to be identical.** Two ticks with the same `token`+`ltp_paise`+`ts_ms` but different `ltq` or `bid_px` are different events.
 7. **raw_payload is the exact decompressed broker packet bytes** (Base64), never the JSON line. `payload_hash` is their SHA-256.
 8. **One record per line, atomic writes.** The emitter serializes complete lines; three slot goroutines may emit concurrently.

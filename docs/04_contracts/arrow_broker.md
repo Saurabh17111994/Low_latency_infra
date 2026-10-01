@@ -47,17 +47,25 @@ OAuth-style token exchange via TOTP AutoLogin only. Credentials: `appID` + `appS
 
 ## 2. Market data feed (`broker_market`)
 
-One WebSocket feed (the Standard feed `wss://ds.arrow.trade` was removed 2026-08-14 — HFT only). Carries `Token` (int32) as the instrument key.
+Two selectable WebSocket channels — one per process, chosen by `ARROW_FEED`: the **standard token stream** `wss://ds.arrow.trade` (the **live channel** on the current account since 2026-09-24; the HFT plan ended and every HFT subscription returned `PLAN_NOT_SUBSCRIBED`) and the **HFT stream** `wss://socket.arrow.trade` (selectable with `ARROW_FEED=hft`; the deployment default is `token`). Both carry `Token` (int32) as the instrument key. The 2026-08-14 note that the Standard feed was removed describes the HFT-only period; the standard stream accepted the same tokens again on 2026-09-24.
 
-### 2a. HFT Data Stream — `wss://socket.arrow.trade?appID=&token=&zstd=1`
+### 2a. HFT Data Stream — `wss://socket.arrow.trade?appID=&token=&zstd=1` (selectable; not the live channel)
 
 - Binary, **little-endian**, **zstd-compressed inbound** (mandatory from **8 July 2026**).
 - Modes: `ltpc` (40B), `full` (196B). Tick interval `latency` 50ms–60000ms (default 1000).
 - Subscribe by symbol (`NSE.SBIN-EQ`) or token IDs (`symIds: [{exch_seg, ids}]`).
-- Prices in **paise** (×100); timestamps in **nanoseconds** (unix).
+- Prices in **paise** (×100); timestamps in **nanoseconds** (unix) — the bridge converts to ms.
 - Per connection: ≤1024 symbols; ≤512 per subscription request.
-- **Tier scope:** basic tier = 1 WebSocket connection; premium tier = 3 connections. The current testing phase uses the basic tier (1 connection) with the 1,024-instrument manifest. The 3-connection / 3,000-instrument coverage is the deferred future production target and requires account capability evidence before activation.
-**Verification flags:** HFT full-mode 196B verified live (BROKER-MD-001, 2026-08-13). The Standard feed (13/17/93/249 B big-endian layouts, 249B full mode) was removed with the Standard feed 2026-08-14.
+- **Tier scope (HFT):** basic tier = 1 WebSocket connection; premium tier = 3 connections. HFT is not subscribed on the current account (plan ended 2026-09-24), so the live path does not exercise these tiers; the 3-connection / 3,000-instrument coverage remains the deferred production target and requires account capability evidence before activation.
+**Verification flags:** HFT full-mode 196B verified live (BROKER-MD-001, 2026-08-13). The token stream's 13/17/93/249 B big-endian layouts (249 B full mode) were verified live on the same 2026-08-13 corpus; the 2026-08-14 removal note applied to the HFT-only period, and the token stream has been the live channel again since 2026-09-24 (`ARROW_FEED=token`).
+
+### 2b. Standard token stream — `wss://ds.arrow.trade` (the live channel, `ARROW_FEED=token`)
+
+- Binary, **big-endian**, uncompressed; frames 13 B (`ltp`), 17 B (`ltpc`), 93 B (`quote`), 249 B (`full`, 5-level depth + CAS trailer). The vendored SDK exposes `StreamModeLTP`/`StreamModeLTPC`/`StreamModeQuote`/`StreamModeFull` and `ParseMarketTick` (`third_party/go-arrow/arrow/streams.go`).
+- Modes are event-driven (update on change), not a fixed cadence; `full` delivers the 5-level book at about 1 Hz (measured 2026-09-24). `MarketTick.Time`/`LTT` arrive at second resolution — the adapter converts to epoch ms exactly like the HFT path.
+- No subscription-response packet: the slot state machine requires one, so `token_slot.go` synthesizes the ack (`SubscribeHFTTokens`).
+- `MarketTick` carries no ATV/BTV and no exchange segment — those v4 columns stay NULL on this channel; depth IS persisted (v4 typed columns, indexes 21-71, plus `raw_payload`).
+- Prices stay in **paise** (the adapter copies `MarketTick` prices into the `*_paise` fields unconverted). The live subscription is `full` mode.
 
 ## 3. Order API (`arrow_rest`)
 

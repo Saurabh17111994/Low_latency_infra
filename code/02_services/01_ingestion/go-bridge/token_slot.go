@@ -17,14 +17,15 @@ package main
 //     explicitly rather than copied.
 //   * HFTFullTick.TS is NANOSECONDS: main.go does int64(t.TS / 1_000_000) for ms.
 //   * MarketTick carries no ATV/BTV and no exchange segment, and in "quote" mode
-//     Bids/Asks come back empty (depth needs "full"). None of those reach raw_table_1,
-//     which stores only price, qty and time.
+//     Bids/Asks come back empty (depth needs "full"). The missing fields stay NULL in
+//     raw_table_1's v4 columns; depth itself IS persisted (toHFTFullTick maps Bids/Asks
+//     into BidPx..AskOrd, indexes 21-71, v4 2026-09-24).
 //   * The only WriteText caller is the heartbeat PONG (main.go); auth refresh goes
 //     through client.AutoLogin, so a no-op here breaks nothing.
 //   * In "quote" mode ticks arrive update-on-change, not on a fixed cadence.
 //   * In "full" mode the stream delivers 5-level depth at about 1 Hz (measured);
-//     "quote" carries no book and updates only on change. Depth is not persisted
-//     (raw_table_1 has no depth columns) but the richer frames do reach raw_payload.
+//     "quote" carries no book and updates only on change. Depth is persisted in the
+//     v4 typed columns (indexes 21-71) and the richer frames also reach raw_payload.
 //   * The standard stream sends NO subscription-response packet. The slot state
 //     machine requires one to leave SUBSCRIBING (main.go's subscribe loop), so this
 //     adapter synthesizes it - see SubscribeHFTTokens.

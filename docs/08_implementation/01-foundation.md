@@ -486,7 +486,7 @@ Canonical draft artifact: `code/01_platform/04_scripts/version_matrix.yaml` (pro
 | ZooKeeper server | `3.9.2` | Official artifact/digest | Fluss metadata/coordination + Flink JobManager HA work (ensemble quorum 2-of-3) | Platform | Pinned, awaiting evidence |
 | Fluss Java client | `1.0.0` | Dependency lock | Must match server | Platform | Pinned (1.0.0; final certificate pending) |
 | Fluss Flink connector | `1.0.0` (flink-2.2) | Dependency lock | Must match Flink and server | Platform | Pinned (1.0.0; final certificate pending) |
-| Broker market protocol | Arrow `socket.arrow.trade` (HFT, binary zstd — the Standard feed `ds.arrow.trade` was removed 2026-08-14) | `docs/04_contracts/arrow_broker.md` | Decoder compatibility | Ingestion | Pinned, awaiting evidence |
+| Broker market protocol | Arrow `ds.arrow.trade` (standard token stream — the live channel, `ARROW_FEED=token`; big-endian 13/17/93/249 B) and `socket.arrow.trade` (HFT, binary zstd, selectable; the 2026-08-14 Standard-feed removal note describes the HFT-only period) | `docs/04_contracts/arrow_broker.md` | Decoder compatibility | Ingestion | Pinned, awaiting evidence |
 | Broker postback protocol | Arrow `order-updates.arrow.trade` (WS JSON) | `docs/04_contracts/arrow_broker.md` | Capture compatibility | Action Capture | Pinned, awaiting evidence |
 | Arrow REST API | `api.arrow.trade/order/regular` | `docs/04_contracts/arrow_broker.md` | Request/response/retry behavior | Execution | Pinned, awaiting evidence |
 | OpenObserve ingestion | `v0.91.5-amd64` (OTLP via `otel-collector:4317`) | `docs/04_contracts/openobserve.md` | Telemetry delivery/redaction | Operations | Pinned, awaiting evidence |

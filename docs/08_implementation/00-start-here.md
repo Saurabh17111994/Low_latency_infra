@@ -25,7 +25,7 @@ Use the repository authority order from [`../01_project/00-index.md`](../01_proj
 
 An implementation dossier must not silently redefine an upstream requirement. If implementation detail exposes a conflict, record it in [`01-foundation.md`](./01-foundation.md) and keep the affected work blocked until the authoritative layer is reconciled.
 
-The 2026-08-14 doc-consistency reconciliation is recorded as [`DEC-039`](../01_project/04-decisions.md). The dossiers in this directory implement its settled facts: HFT feed modes are canonical `ltpc` (40 B) + `full` (196 B); timestamps are canonical epoch milliseconds; `Postback_Projection_Ledger` is included in the MVP build; `Safety_Halt_Requests` is a KV control table; the acceptance matrix is fully mapped (132 requirements / 152 acceptance tests).
+The 2026-08-14 doc-consistency reconciliation is recorded as [`DEC-039`](../01_project/04-decisions.md). The dossiers in this directory implement its settled facts: HFT feed modes are `ltpc` (40 B) + `full` (196 B) while the standard token stream — the live channel since 2026-09-24, `ARROW_FEED=token` — carries `ltp`/`ltpc`/`quote`/`full` (13/17/93/249 B); timestamps are canonical epoch milliseconds; `Postback_Projection_Ledger` is included in the MVP build; `Safety_Halt_Requests` is a KV control table; the acceptance matrix is fully mapped (132 requirements / 152 acceptance tests).
 
 ## Documentation-first workflow
 

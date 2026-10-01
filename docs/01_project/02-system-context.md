@@ -3,7 +3,7 @@
 ## Current topology
 
 ```text
-Arrow HFT market-data WebSocket (wss://socket.arrow.trade, binary; Standard feed removed 2026-08-14)
+Arrow market-data WebSocket — live standard token stream (wss://ds.arrow.trade, `ARROW_FEED=token`) + selectable HFT (wss://socket.arrow.trade); the 2026-08-14 Standard-feed removal note describes the HFT-only period, ended 2026-09-24
   → Ingestion (binary decoder, epoch-sec → epoch-ms, paise → rupees)
   → Fluss raw_table_1 LOG
   → Signal Flink job

@@ -130,7 +130,8 @@ field). VM-BROKER-MKT-008 flipped `COMPATIBLE` (`EVIDENCE_RECORDED_LIVE`).
 Live reconnect/replay/echo is not an acceptance item (DEC-037, 2026-08-13);
 bridge-level ING-RES-001 soak PASS (2026-08-13) is the reconnect evidence.
 Evidence: `logs/broker-md-001/`. (The Standard feed `ds.arrow.trade` evidence
-13/17/93/249 B was retired with the Standard feed removal 2026-08-14.)
+13/17/93/249 B was set aside with the HFT-only switch on 2026-08-14; it applies again
+since the 2026-09-24 channel switch to `ARROW_FEED=token`, the live channel.)
 
 ## Environment tiers
 

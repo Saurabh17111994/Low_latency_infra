@@ -278,7 +278,7 @@ All thresholds use 60s consecutive breach (Foundation Task 7), enforced where ea
 
 | SLO | Boundary | Target |
 | --- | --- | --- |
-| Raw append | Broker packet received → Fluss append acknowledged | p99 <50 ms target (≤ 20 ms transport linger); evidence-gated |
+| Raw append | Broker packet received → Fluss append acknowledged | p99 <50 ms target (client writer linger live 1 ms; the pre-O-2 20 ms bound is historical); evidence-gated |
 | Decision | Trigger tick consumed → immutable decision committed | p99 <100 ms at variable 50,000 ticks/s average baseline (3,000 instruments; ≈16.7 ticks/s/instrument average) |
 | Delivery | Decision committed → Executor received | Baseline then threshold |
 | Broker REST | Arrow REST request start → verified broker response | Report separately; evidence-gated |

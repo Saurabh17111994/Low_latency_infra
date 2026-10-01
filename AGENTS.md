@@ -119,8 +119,11 @@ doc), the marker flips, and the operator-approval list. Tracker hygiene:
   live-money remains disabled. (`03_action_capture` retired 2026-09-10 —
   capture path runs in the Execution Core: go-arrow bridge + executor + `common`
   projection + gateway.)
-- Canonical data facts (DEC-039): feed modes `ltpc` (40 B) + `full` (196 B);
-  timestamps are epoch milliseconds. No other formats.
+- Canonical data facts (DEC-039 + the 2026-09-24 channel switch): two selectable
+  market-data channels — the standard token stream (live, `ARROW_FEED=token`; modes
+  `ltp`/`ltpc`/`quote`/`full`, 13/17/93/249 B big-endian, 249 B `full`) and HFT
+  (`ARROW_FEED=hft`; modes `ltpc`/`full`, 40/196 B little-endian zstd); timestamps are
+  epoch milliseconds after bridge conversion. No other formats.
 - `logs/tracker-14/` holds dated evidence records — append new dated files, never edit
   past evidence.
 - Secrets live in `.env` (`make env` copies from `.env.example`). Never commit secrets.

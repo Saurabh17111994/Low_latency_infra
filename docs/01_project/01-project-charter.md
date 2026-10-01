@@ -11,7 +11,7 @@
 
 ## Purpose
 
-The Streaming Trading Data Platform ingests live Arrow Trade market data via the binary HFT WebSocket (`wss://socket.arrow.trade`; the Standard feed `wss://ds.arrow.trade` was removed 2026-08-14), computes features and signals with Apache Flink, stores live events in Apache Fluss, executes approved instructions through Arrow's native REST API (`https://edge.arrow.trade`), captures postbacks via Arrow's order-updates WebSocket (`wss://order-updates.arrow.trade`), and preserves eligible history in Apache Iceberg on S3.
+The Streaming Trading Data Platform ingests live Arrow Trade market data from the selectable Arrow WebSocket channels — the live standard token stream (`wss://ds.arrow.trade`, `ARROW_FEED=token`) or HFT (`wss://socket.arrow.trade`, `ARROW_FEED=hft`; the 2026-08-14 Standard-feed removal note describes the HFT-only period, ended 2026-09-24) — computes features and signals with Apache Flink, stores live events in Apache Fluss, executes approved instructions through Arrow's native REST API (`https://edge.arrow.trade`), captures postbacks via Arrow's order-updates WebSocket (`wss://order-updates.arrow.trade`), and preserves eligible history in Apache Iceberg on S3.
 
 The platform separates the **data path** from the **order path**:
 
@@ -31,7 +31,7 @@ The platform separates the **data path** from the **order path**:
 
 ## In scope for MVP
 
-- Arrow market-data ingestion (binary protocol: HFT LTPC/Full modes — Standard feed carrying LTP/Quote removed 2026-08-14)
+- Arrow market-data ingestion (selectable binary channels: standard token stream 13/17/93/249 B big-endian, live; HFT 40/196 B little-endian zstd, selectable — the 2026-08-14 Standard-feed removal note describes the HFT-only period, ended 2026-09-24)
 - Single Arrow Trade account; NSE, NFO, MCX, and INDEX segments
 - Fluss raw and feature LOG tables
 - Flink 2.2.1 deduplication, event-time windows, candle computation
