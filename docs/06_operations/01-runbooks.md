@@ -116,7 +116,11 @@ make day ARGS="stop"      # graceful stop; checkpoints/volumes preserved
   + savepoint/checkpoint state -> restore through
   `make rollout-savepoint ARGS="RECOVERY_PATH=<path>"` (the native path); none
   + no state -> refuse unless `ALLOW_FRESH=1` (dev bootstrap starts at LATEST,
-  no backlog replay); two -> fail with the cancel action.
+  no backlog replay); two -> fail with the cancel action. A completed job
+  (FAILED/CANCELED/FINISHED) stays in the JobManager archive — the default
+  memory job store has no REST delete and `PATCH ?mode=cancel` returns 409 for
+  terminal states — and is **ignored** by the singleton checks (CHG-507): it
+  cannot conflict, so the next start restores over it.
 - **Exit codes.** 0 = GREEN or PENDING; 1 = RED (first failing invariant named
   with its recovery action); 3 = fail-closed preflight/SignalJob refusal;
   4 = another writer holds the stack lock. `make` reports a red board as exit
@@ -133,7 +137,7 @@ make day ARGS="stop"      # graceful stop; checkpoints/volumes preserved
 | I2 fluss | metadata probe failed | wait / re-run `make up`; crash-looping tablet -> `code/01_platform/04_scripts/fluss-repair/repair-tablet.sh` |
 | I3 ingestion | raw appends stalled | §Broker market-data disconnect; `make logs SVC=ingestion`; check `ARROW_FEED`/broker token in `.env` |
 | I4 data-flow | candles/signals not moving | §Flink job or checkpoint failure; `make rollout-savepoint` (restore, no state loss) |
-| I5 signaljob | not exactly one / stale checkpoint | §SignalJob (compute) operations — Start (normal RESTORE); duplicates: cancel via Flink REST |
+| I5 signaljob | not exactly one / stale checkpoint | §SignalJob (compute) operations — Start (normal RESTORE); live duplicates: cancel via Flink REST (`PATCH /jobs/<id>?mode=cancel`); a terminal job in the archive is ignored (CHG-507) |
 | I6 execution | profile down or live flags | `COMPOSE_PROFILES=execution-t3 make up`; never set the flags |
 | I7 config | effective manifest mismatch / live flag | check `UNIVERSE` / `INSTRUMENT_MANIFEST_HOST_PATH`; unset the flag |
 | I8 errors | FATAL/BRIDGE_CRASH/backpressure lines | map the line via §Broker market-data disconnect / §Checkpoint failure (SignalJob); the cold-start `update metadata` flap is covered by `INGESTION_WRITE_STARTUP_GRACE_MS` (CHG-326/CHG-356, default 3600 s; 0 disables) |

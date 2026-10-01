@@ -298,6 +298,21 @@ class SignalJobDecisionTests(unittest.TestCase):
             "latest_savepoint": "sp", "latest_checkpoint": "ck"}, False)
         self.assertEqual((decision.action, decision.path), ("restore", "sp"))
 
+    def test_terminal_failed_job_does_not_block_restore(self):
+        # A completed job stays in the JobManager archive (no REST delete;
+        # PATCH cancel -> 409), so it must not block the next run's restore.
+        decision = day_run.decide_signaljob(
+            [{"id": "old", "name": day_run.SIGNAL_JOB_NAME, "state": "FAILED"}],
+            {"latest_checkpoint": "ck"}, False)
+        self.assertEqual((decision.action, decision.path), ("restore", "ck"))
+
+    def test_terminal_job_does_not_hide_the_running_one(self):
+        decision = day_run.decide_signaljob(
+            [{"id": "old", "name": day_run.SIGNAL_JOB_NAME, "state": "CANCELED"},
+             {"id": "new", "name": day_run.SIGNAL_JOB_NAME, "state": "RUNNING"}],
+            {}, False)
+        self.assertEqual((decision.action, decision.reason), ("keep", "RUNNING id=new"))
+
     def test_restore_from_checkpoint(self):
         decision = day_run.decide_signaljob([], {"latest_checkpoint": "ck"}, False)
         self.assertEqual((decision.action, decision.path), ("restore", "ck"))
@@ -461,6 +476,24 @@ class CommandFlowTests(unittest.TestCase):
         runner = FakeRunner()
         collector = FakeCollector(
             jobs=[[], [{"id": "a", "name": day_run.SIGNAL_JOB_NAME, "state": "RUNNING"}]],
+            state={"latest_savepoint": None,
+                   "latest_checkpoint": "file:///checkpoints/j1/chk-6"},
+            checkpoints={"a": {"latest_completed_ms": now_ms() - 1000}},
+        )
+        rc = day_run.main(["start"], runner=runner,
+                          collector_factory=lambda r: collector)
+        self.assertEqual(rc, 0)
+        self.assertTrue(runner.has("rollout-savepoint"))
+        self.assertTrue(runner.has("RECOVERY_PATH=file:///checkpoints/j1/chk-6"))
+
+    def test_start_restores_with_a_retained_failed_job(self):
+        # Regression (2026-10-02 live smoke): the JM keeps the failed job in
+        # its archive; start must restore over it instead of refusing.
+        runner = FakeRunner()
+        collector = FakeCollector(
+            jobs=[[{"id": "old", "name": day_run.SIGNAL_JOB_NAME, "state": "FAILED"}],
+                  [{"id": "old", "name": day_run.SIGNAL_JOB_NAME, "state": "FAILED"},
+                   {"id": "a", "name": day_run.SIGNAL_JOB_NAME, "state": "RUNNING"}]],
             state={"latest_savepoint": None,
                    "latest_checkpoint": "file:///checkpoints/j1/chk-6"},
             checkpoints={"a": {"latest_completed_ms": now_ms() - 1000}},

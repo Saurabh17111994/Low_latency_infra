@@ -64,6 +64,12 @@ MAX_CONNECTIONS = 3
 EXECUTION_PROFILE = "execution-t3"
 SIGNAL_JOB_NAME = "signal-job-compute"
 COMPANION_JOB_NAMES = ("Babysitter Positions observer", "Safety-halt consumer")
+# Flink terminal states: a completed job stays in the JobManager archive (the
+# default memory job store has no REST delete) but cannot conflict with a live
+# one and cannot be canceled (PATCH cancel -> 409). The singleton checks must
+# ignore it, or one failed job blocks every later `make day start` until the
+# JobManager restarts.
+TERMINAL_JOB_STATES = frozenset({"FINISHED", "CANCELED", "FAILED"})
 CHECKPOINT_INTERVAL_MS = 10_000  # compose pin (CHECKPOINT_INTERVAL_MS)
 # F1 (2026-09-28): ceiling for the ready wait. The wait itself is state-based
 # (all services are running + Fluss metadata readable + Flink reachable, two
@@ -300,9 +306,21 @@ def posture_violations(env: dict) -> list:
     return bad
 
 
+def _live_signal_jobs(jobs: list) -> list:
+    """SignalJobs that can still conflict: terminal archive entries ignored.
+
+    The JobManager keeps recent completed jobs for the Web UI; a FAILED job
+    from an earlier attempt is not a split-brain risk and cannot be canceled
+    via REST, so it must never block keep/restore decisions or the ready wait.
+    """
+    return [j for j in jobs
+            if j.get("name") == SIGNAL_JOB_NAME
+            and j.get("state") not in TERMINAL_JOB_STATES]
+
+
 def decide_signaljob(jobs: list, state: dict, allow_fresh: bool) -> SignalJobDecision:
     """Singleton rules (plan §3.3): keep / restore / refuse-fresh, never two."""
-    signals = [j for j in jobs if j.get("name") == SIGNAL_JOB_NAME]
+    signals = _live_signal_jobs(jobs)
     if len(signals) > 1:
         ids = ", ".join(sorted(j.get("id", "?") for j in signals))
         return SignalJobDecision(
@@ -366,9 +384,7 @@ def session_now(now: dt.datetime | None = None) -> dict:
 
 
 def _checkpoint_age_ms(facts: Facts) -> int | None:
-    for job in facts.jobs:
-        if job.get("name") != SIGNAL_JOB_NAME:
-            continue
+    for job in _live_signal_jobs(facts.jobs):
         cp = facts.checkpoints.get(job.get("id"), {}) or {}
         sampled = cp.get("age_ms")
         if sampled is not None:
@@ -1077,7 +1093,7 @@ def wait_signaljob(collector: Collector, runner: Runner, timeout_s: int = 240) -
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         jobs = collector.jobs()
-        signals = [j for j in jobs if j.get("name") == SIGNAL_JOB_NAME]
+        signals = _live_signal_jobs(jobs)
         if len(signals) == 1 and signals[0].get("state") == "RUNNING":
             cps = collector.checkpoints(signals)
             if cps.get(signals[0]["id"], {}).get("latest_completed_ms"):
