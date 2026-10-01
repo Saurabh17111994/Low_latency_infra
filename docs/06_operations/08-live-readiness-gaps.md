@@ -46,7 +46,7 @@ progress belongs to the ledger.
 | 6 | Alert thresholds and live dashboards | Need measurements from rows 2–3 (D4/D5/D7) | observability |
 | 7 | Ingestion acceptance rows still lacking artefacts (7 of 15) | `EVIDENCE_BLOCKED`/`NOT_IMPLEMENTED`, unblocked by `test/ingestion/*` on production VMs plus market hours | requirements `REL-REQ` |
 | 8 | Single-operator approval (DEC-044) | Gate path and hash binding are proven; the real epoch flip waits for E5 sign-off after rows 1–7 | approval `REL-APPROVAL`; automatic enablement and automatic resume are prohibited |
-| 9 | Current-tree caveats recorded 2026-09-19 | Last certification run `f2faf565`; no gate run since, by decision; no live load-test run exists, so no throughput figure exists | none — recorded so recent offline work is not mistaken for certification |
+| 9 | Current-tree caveats (recorded 2026-09-19, refreshed 2026-10-01) | Offline certification is current: full gate at `9e103328`, PASS 19/19, 2026-10-01 (`logs/soak/monday-gates-20261001-171407`). No live load-test run exists, so no throughput figure exists; offline certification does not satisfy rows 1–7 | none — recorded so offline certification is not mistaken for live-money evidence |
 
 ## Bucket view
 
