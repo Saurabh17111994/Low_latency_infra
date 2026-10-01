@@ -1,5 +1,6 @@
 package com.trading.compute.signaljob;
 
+import com.trading.compute.feature.FeatureView;
 import com.trading.compute.feature.PerInstrumentFeatures;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -39,7 +40,11 @@ import org.slf4j.LoggerFactory;
  * timeframe per accepted trade tick on the fast feed, or the six-row 1s
  * snapshot fallback), input 2 = completed candles
  * ({@link CandleClosedColumns}). Each input fans out to every registered
- * strategy of that instrument, in registration order.
+ * strategy of that instrument, in registration order. Every callback receives
+ * the slot's stable {@link StrategyView} bundle (market + features + context,
+ * 2026-10-01): the market snapshot is decoded from the canonical
+ * {@code FIFTEEN_S} forming row only and is available on the live, closed and
+ * context-ready paths.
  *
  * <p><b>State.</b> Per-instrument strategy instances live on the heap
  * (intentional amnesia, same rationale as N7: a restore rebuilds from
@@ -312,6 +317,14 @@ public class StrategyHostFunction
         // snapshot; every row fans out to strategies below.
         boolean canonicalTick = Timeframe.FIFTEEN_S.code()
                 .equals(String.valueOf(live.getString(CandleLiveColumns.TF)));
+        if (canonicalTick) {
+            // 2026-10-01 native design: the canonical row is the only carrier
+            // of the market snapshot (one row per tick, not six). Decode it
+            // into the slot's MarketSnapshot before the fan-out so every
+            // strategy reads the fresh values through the shared view. A
+            // non-canonical row never touches the snapshot.
+            decodeMarketSnapshot(slot.market, live);
+        }
         if (canonicalTick && liveAge != null && evtTime > 0L) {
             liveAge.update(Math.max(0L, System.currentTimeMillis() - evtTime));
         }
@@ -336,7 +349,7 @@ public class StrategyHostFunction
             // P2-057: one strategy must not starve the others — isolate,
             // count, and continue to the next strategy.
             try {
-                s.onLiveTick(live, contextView, slot.features, new DedupCollector(out, s.ruleId()));
+                s.onLiveTick(live, slot.view, new DedupCollector(out, s.ruleId()));
             } catch (Exception e) {
                 countFailedStrategy();
                 LOG.warn("strategy-host: dropping failed onLiveTick rule={} token={}: {}",
@@ -364,6 +377,65 @@ public class StrategyHostFunction
         }
     }
 
+    /**
+     * Decodes the 44-column market section of the canonical forming row into
+     * the slot's {@link MarketSnapshot} (2026-10-01 native design). NULL means
+     * "never seen / not provided" -> 0, the {@link MarketView} convention; the
+     * aggregator already carries the latest-known value of every field on this
+     * row, so overwriting is exact — no merge against the previous row.
+     * Package-private for the unit guard test.
+     */
+    static void decodeMarketSnapshot(MarketSnapshot m, RowData live) {
+        m.totalBuyQty = longOrZero(live, CandleLiveColumns.MKT_TOTAL_BUY_QTY);
+        m.totalSellQty = longOrZero(live, CandleLiveColumns.MKT_TOTAL_SELL_QTY);
+        m.dayOpenPaise = longOrZero(live, CandleLiveColumns.MKT_DAY_OPEN_PAISE);
+        m.dayHighPaise = longOrZero(live, CandleLiveColumns.MKT_DAY_HIGH_PAISE);
+        m.dayLowPaise = longOrZero(live, CandleLiveColumns.MKT_DAY_LOW_PAISE);
+        m.prevClosePaise = longOrZero(live, CandleLiveColumns.MKT_PREV_CLOSE_PAISE);
+        m.vwapPaise = longOrZero(live, CandleLiveColumns.MKT_VWAP_PAISE);
+        m.openInterest = longOrZero(live, CandleLiveColumns.MKT_OPEN_INTEREST);
+        m.oiDayHigh = longOrZero(live, CandleLiveColumns.MKT_OI_DAY_HIGH);
+        m.oiDayLow = longOrZero(live, CandleLiveColumns.MKT_OI_DAY_LOW);
+        m.lowerLimitPaise = longOrZero(live, CandleLiveColumns.MKT_LOWER_LIMIT_PAISE);
+        m.upperLimitPaise = longOrZero(live, CandleLiveColumns.MKT_UPPER_LIMIT_PAISE);
+        m.bidPx1 = longOrZero(live, CandleLiveColumns.MKT_BID_PX_1);
+        m.bidPx2 = longOrZero(live, CandleLiveColumns.MKT_BID_PX_2);
+        m.bidPx3 = longOrZero(live, CandleLiveColumns.MKT_BID_PX_3);
+        m.bidPx4 = longOrZero(live, CandleLiveColumns.MKT_BID_PX_4);
+        m.bidPx5 = longOrZero(live, CandleLiveColumns.MKT_BID_PX_5);
+        m.bidQty1 = longOrZero(live, CandleLiveColumns.MKT_BID_QTY_1);
+        m.bidQty2 = longOrZero(live, CandleLiveColumns.MKT_BID_QTY_2);
+        m.bidQty3 = longOrZero(live, CandleLiveColumns.MKT_BID_QTY_3);
+        m.bidQty4 = longOrZero(live, CandleLiveColumns.MKT_BID_QTY_4);
+        m.bidQty5 = longOrZero(live, CandleLiveColumns.MKT_BID_QTY_5);
+        m.bidOrd1 = longOrZero(live, CandleLiveColumns.MKT_BID_ORD_1);
+        m.bidOrd2 = longOrZero(live, CandleLiveColumns.MKT_BID_ORD_2);
+        m.bidOrd3 = longOrZero(live, CandleLiveColumns.MKT_BID_ORD_3);
+        m.bidOrd4 = longOrZero(live, CandleLiveColumns.MKT_BID_ORD_4);
+        m.bidOrd5 = longOrZero(live, CandleLiveColumns.MKT_BID_ORD_5);
+        m.askPx1 = longOrZero(live, CandleLiveColumns.MKT_ASK_PX_1);
+        m.askPx2 = longOrZero(live, CandleLiveColumns.MKT_ASK_PX_2);
+        m.askPx3 = longOrZero(live, CandleLiveColumns.MKT_ASK_PX_3);
+        m.askPx4 = longOrZero(live, CandleLiveColumns.MKT_ASK_PX_4);
+        m.askPx5 = longOrZero(live, CandleLiveColumns.MKT_ASK_PX_5);
+        m.askQty1 = longOrZero(live, CandleLiveColumns.MKT_ASK_QTY_1);
+        m.askQty2 = longOrZero(live, CandleLiveColumns.MKT_ASK_QTY_2);
+        m.askQty3 = longOrZero(live, CandleLiveColumns.MKT_ASK_QTY_3);
+        m.askQty4 = longOrZero(live, CandleLiveColumns.MKT_ASK_QTY_4);
+        m.askQty5 = longOrZero(live, CandleLiveColumns.MKT_ASK_QTY_5);
+        m.askOrd1 = longOrZero(live, CandleLiveColumns.MKT_ASK_ORD_1);
+        m.askOrd2 = longOrZero(live, CandleLiveColumns.MKT_ASK_ORD_2);
+        m.askOrd3 = longOrZero(live, CandleLiveColumns.MKT_ASK_ORD_3);
+        m.askOrd4 = longOrZero(live, CandleLiveColumns.MKT_ASK_ORD_4);
+        m.askOrd5 = longOrZero(live, CandleLiveColumns.MKT_ASK_ORD_5);
+        m.statsChangedAt = longOrZero(live, CandleLiveColumns.MKT_STATS_CHANGED_AT);
+        m.depthChangedAt = longOrZero(live, CandleLiveColumns.MKT_DEPTH_CHANGED_AT);
+    }
+
+    private static long longOrZero(RowData row, int index) {
+        return row.isNullAt(index) ? 0L : row.getLong(index);
+    }
+
     /** Completed candle (input 2): fan out to every strategy. */
     @Override
     public void processElement2(RowData closed, Context ctx, Collector<RowData> out)
@@ -381,7 +453,7 @@ public class StrategyHostFunction
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: same isolation on the closed path.
             try {
-                s.onClosedCandle(closed, slot.features, new DedupCollector(out, s.ruleId()));
+                s.onClosedCandle(closed, slot.view, new DedupCollector(out, s.ruleId()));
             } catch (Exception e) {
                 countFailedStrategy();
                 LOG.warn("strategy-host: dropping failed onClosedCandle rule={} token={}: {}",
@@ -418,7 +490,7 @@ public class StrategyHostFunction
             }
             for (SignalStrategy s : slot.strategies.values()) {
                 try {
-                    s.onContextReady(pending.live, contextView, slot.features,
+                    s.onContextReady(pending.live, slot.view,
                             new DedupCollector(out, s.ruleId()));
                 } catch (Exception e) {
                     countFailedStrategy();
@@ -513,7 +585,7 @@ public class StrategyHostFunction
                         + "dropping key {}", slots.size(), SUBTASK_SLOT_CAP, key);
                 return null;
             }
-            slot = new HostSlot();
+            slot = new HostSlot(contextView);
             for (String id : strategyIds) {
                 slot.strategies.put(
                         id, Strategies.create(id, config, sharedMetrics.get(id)));
@@ -529,6 +601,49 @@ public class StrategyHostFunction
 
         /** DEC-056: this instrument's shared feature state — computed once, read by every strategy. */
         final PerInstrumentFeatures features = new PerInstrumentFeatures();
+
+        /** Latest market snapshot, decoded from the canonical forming row (2026-10-01). */
+        final MarketSnapshot market = new MarketSnapshot();
+
+        /** The shared bundle handed to every strategy callback (stable per slot). */
+        final StrategyView view;
+
+        HostSlot(ContextView context) {
+            this.view = new SlotView(market, features, context);
+        }
+    }
+
+    /**
+     * The per-slot {@link StrategyView} implementation: three fixed
+     * references, no per-callback allocation. A null context (only possible
+     * if a slot were created outside the open lifecycle) resolves to the
+     * disabled singleton so the view never exposes a null component.
+     */
+    private static final class SlotView implements StrategyView {
+        private final MarketView market;
+        private final FeatureView features;
+        private final ContextView context;
+
+        SlotView(MarketView market, FeatureView features, ContextView context) {
+            this.market = market;
+            this.features = features;
+            this.context = context == null ? ContextView.disabled() : context;
+        }
+
+        @Override
+        public MarketView market() {
+            return market;
+        }
+
+        @Override
+        public FeatureView features() {
+            return features;
+        }
+
+        @Override
+        public ContextView context() {
+            return context;
+        }
     }
 
     /**

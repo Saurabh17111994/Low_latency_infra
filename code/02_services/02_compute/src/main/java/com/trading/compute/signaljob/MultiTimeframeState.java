@@ -9,7 +9,8 @@ import java.io.Serializable;
  * never as Flink managed {@code ValueState} (intentional amnesia: a restore
  * restarts empty and rebuilds from live ticks). Holds six forming
  * {@link CandleAccumulator}s, six {@link MultiTimeframeClosedRing}s (15 each),
- * quote snapshot, discontinuity marker, and monotonic gate fields. Plain
+ * a nested {@link MarketSnapshot} (42 values + two change clocks), a
+ * discontinuity marker, and monotonic gate fields. Plain
  * {@link Serializable} with D1 public fields for Flink POJO extraction — same
  * rule as {@link CandleAccumulator}.
  *
@@ -26,8 +27,8 @@ import java.io.Serializable;
  * {@link Timeframe#values()} without reflection.
  *
  * <p>Memory per instrument ~7.3 KiB heap (≈1 KiB serialised — §C.2): 6×~300 B
- * forming + 6×15×~60 B closed + quote/marker overhead. O(instruments×TF×15),
- * not O(ticks).
+ * forming + 6×15×~60 B closed + quote/market overhead (~0.4 KiB for the
+ * nested market snapshot). O(instruments×TF×15), not O(ticks).
  */
 public class MultiTimeframeState implements Serializable {
 
@@ -49,30 +50,13 @@ public class MultiTimeframeState implements Serializable {
     public MultiTimeframeClosedRing closedFiveM;
     public MultiTimeframeClosedRing closedFifteenM;
 
-    // ── market snapshot (2026-10-01): level-1 quote + day stats + limits ──
-    // Latest non-null raw value per field (0 = not yet seen); updated by every
-    // accepted tick (trade or quote), never cleared by resetForming — the same
-    // survival contract the original quote snapshot had (P2-152).
-    public long lastBidPaise;
-    public long lastAskPaise;
-    public long lastBidSize;
-    public long lastAskSize;
-    /** Event time of the last tick that updated any market-snapshot field. */
-    public long lastQuoteEventTime;
-
-    public long lastDayOpenPaise;
-    public long lastDayHighPaise;
-    public long lastDayLowPaise;
-    /** PREVIOUS day's close (raw close_paise) — not today's. */
-    public long lastPrevClosePaise;
-    public long lastVwapPaise;
-    public long lastTotalBuyQty;
-    public long lastTotalSellQty;
-    public long lastOpenInterest;
-    public long lastOiDayHigh;
-    public long lastOiDayLow;
-    public long lastLowerLimitPaise;
-    public long lastUpperLimitPaise;
+    // ── market snapshot (2026-10-01 native design) ──────────────────────
+    // Latest non-null raw market value per field (0 = not yet seen), updated
+    // by every accepted tick (trade or quote), never cleared by resetForming —
+    // the same survival contract the original quote snapshot had (P2-152).
+    // One nested POJO holds the 12 stats, the 30-column depth ladder, and the
+    // two change clocks; the type implements MarketView for strategies.
+    public MarketSnapshot market;
 
     // ── discontinuity marker ─────────────────────────────────────────────
     public boolean discontinuityPending;
@@ -98,24 +82,7 @@ public class MultiTimeframeState implements Serializable {
         closedFiveM = new MultiTimeframeClosedRing();
         closedFifteenM = new MultiTimeframeClosedRing();
 
-        lastBidPaise = 0L;
-        lastAskPaise = 0L;
-        lastBidSize = 0L;
-        lastAskSize = 0L;
-        lastQuoteEventTime = 0L;
-
-        lastDayOpenPaise = 0L;
-        lastDayHighPaise = 0L;
-        lastDayLowPaise = 0L;
-        lastPrevClosePaise = 0L;
-        lastVwapPaise = 0L;
-        lastTotalBuyQty = 0L;
-        lastTotalSellQty = 0L;
-        lastOpenInterest = 0L;
-        lastOiDayHigh = 0L;
-        lastOiDayLow = 0L;
-        lastLowerLimitPaise = 0L;
-        lastUpperLimitPaise = 0L;
+        market = new MarketSnapshot();
 
         discontinuityPending = false;
         lastDiscontinuityEventTime = 0L;
@@ -176,7 +143,7 @@ public class MultiTimeframeState implements Serializable {
 
     /**
      * Reset all forming accumulators to fresh (empty) state, keeping closed
-     * rings and quote snapshot intact.
+     * rings and the market snapshot intact.
      *
      * <p>P2-151: in-place {@code clear()} — preserves {@code forming(tf)}
      * reference identity, so previously returned live refs stay valid. No

@@ -128,4 +128,37 @@ public interface SignalStrategy extends Serializable {
             Collector<RowData> out) throws Exception {
         onContextReady(live, context, out);
     }
+
+    /**
+     * View-aware overload (2026-10-01 native design): the live forming-candle
+     * snapshot plus the shared {@link StrategyView} bundle (market + features
+     * + context). The host calls <b>this</b> form; the default delegates to
+     * {@link #onLiveTick(RowData, ContextView, FeatureView, Collector)}, so
+     * every strategy written before the view existed keeps working unchanged.
+     * Override one form of a callback, not several.
+     */
+    default void onLiveTick(RowData live, StrategyView view, Collector<RowData> out)
+            throws Exception {
+        onLiveTick(live, view.context(), view.features(), out);
+    }
+
+    /**
+     * View-aware {@link #onClosedCandle(RowData, FeatureView, Collector)};
+     * the host calls this form. The market view carries the latest snapshot
+     * for the instrument (refreshed on the canonical forming row), so a
+     * strategy can read market state on the close path too.
+     */
+    default void onClosedCandle(RowData closed, StrategyView view, Collector<RowData> out)
+            throws Exception {
+        onClosedCandle(closed, view.features(), out);
+    }
+
+    /**
+     * View-aware {@link #onContextReady(RowData, ContextView, FeatureView, Collector)};
+     * the host calls this form.
+     */
+    default void onContextReady(RowData live, StrategyView view, Collector<RowData> out)
+            throws Exception {
+        onContextReady(live, view.context(), view.features(), out);
+    }
 }

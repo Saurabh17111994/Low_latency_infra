@@ -85,13 +85,16 @@ class MultiTimeframeStateTest {
     }
 
     @Test
-    void quoteFieldsDefaultZero() {
+    void marketSnapshotDefaultsEmpty() {
         MultiTimeframeState state = new MultiTimeframeState();
-        assertEquals(0L, state.lastBidPaise);
-        assertEquals(0L, state.lastAskPaise);
-        assertEquals(0L, state.lastBidSize);
-        assertEquals(0L, state.lastAskSize);
-        assertEquals(0L, state.lastQuoteEventTime);
+        assertEquals(0L, state.market.bidPx1);
+        assertEquals(0L, state.market.askPx1);
+        assertEquals(0L, state.market.bidQty1);
+        assertEquals(0L, state.market.askQty1);
+        assertEquals(0L, state.market.statsChangedAt);
+        assertEquals(0L, state.market.depthChangedAt);
+        assertFalse(state.market.hasStats(), "nothing seen yet -> no stats");
+        assertFalse(state.market.hasDepth(), "nothing seen yet -> no depth");
     }
 
     @Test
@@ -219,38 +222,40 @@ class MultiTimeframeStateTest {
     }
 
     @Test
-    void quoteSnapshotSurvivesResetGateAdvancesExplicitly() {
+    void marketSnapshotSurvivesResetGateAdvancesExplicitly() {
         MultiTimeframeState state = new MultiTimeframeState();
-        state.lastBidPaise = 1000L;
-        state.lastAskPaise = 1010L;
-        state.lastBidSize = 5L;
-        state.lastAskSize = 7L;
-        state.lastQuoteEventTime = 123456789L;
-        state.lastDayHighPaise = 2222L;
-        state.lastVwapPaise = 3333L;
-        state.lastTotalBuyQty = 4444L;
-        state.lastTotalSellQty = 5555L;
-        state.lastOpenInterest = 6666L;
-        state.lastLowerLimitPaise = 7777L;
-        state.lastUpperLimitPaise = 8888L;
+        state.market.bidPx1 = 1000L;
+        state.market.askPx1 = 1010L;
+        state.market.bidQty1 = 5L;
+        state.market.askQty1 = 7L;
+        state.market.statsChangedAt = 123456789L;
+        state.market.depthChangedAt = 123456790L;
+        state.market.dayHighPaise = 2222L;
+        state.market.vwapPaise = 3333L;
+        state.market.totalBuyQty = 4444L;
+        state.market.totalSellQty = 5555L;
+        state.market.openInterest = 6666L;
+        state.market.lowerLimitPaise = 7777L;
+        state.market.upperLimitPaise = 8888L;
         state.lastFingerprint = "fp-xyz";
 
         // P2-152: gate + marker are explicit params now — gap-drop sets,
         // overnight clears; the market snapshot always survives.
         state.resetForming(555L, true);
 
-        assertEquals(1000L, state.lastBidPaise);
-        assertEquals(1010L, state.lastAskPaise);
-        assertEquals(5L, state.lastBidSize);
-        assertEquals(7L, state.lastAskSize);
-        assertEquals(123456789L, state.lastQuoteEventTime);
-        assertEquals(2222L, state.lastDayHighPaise);
-        assertEquals(3333L, state.lastVwapPaise);
-        assertEquals(4444L, state.lastTotalBuyQty);
-        assertEquals(5555L, state.lastTotalSellQty);
-        assertEquals(6666L, state.lastOpenInterest);
-        assertEquals(7777L, state.lastLowerLimitPaise);
-        assertEquals(8888L, state.lastUpperLimitPaise);
+        assertEquals(1000L, state.market.bidPx1);
+        assertEquals(1010L, state.market.askPx1);
+        assertEquals(5L, state.market.bidQty1);
+        assertEquals(7L, state.market.askQty1);
+        assertEquals(123456789L, state.market.statsChangedAt);
+        assertEquals(123456790L, state.market.depthChangedAt);
+        assertEquals(2222L, state.market.dayHighPaise);
+        assertEquals(3333L, state.market.vwapPaise);
+        assertEquals(4444L, state.market.totalBuyQty);
+        assertEquals(5555L, state.market.totalSellQty);
+        assertEquals(6666L, state.market.openInterest);
+        assertEquals(7777L, state.market.lowerLimitPaise);
+        assertEquals(8888L, state.market.upperLimitPaise);
         assertTrue(state.discontinuityPending);
         assertEquals(555L, state.lastDiscontinuityEventTime);
         assertEquals(555L, state.lastEventTime);

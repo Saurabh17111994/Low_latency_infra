@@ -53,9 +53,10 @@ public final class RawTableColumns {
      */
     public static final int VOLUME_DELTA = 27;
 
-    // --- strategy market snapshot (2026-10-01): the 16 raw extras the signal
-    // job carries to strategies on every forming row. Add a constant when a
-    // reader lands; MultiTimeframeAggregateFunction#updateMarketSnapshot is
+    // --- strategy market snapshot (2026-10-01 native design): the 42 raw
+    // market values the signal job carries to strategies on the canonical
+    // forming row (12 stats + the 30-column depth ladder). Add a constant when
+    // a reader lands; MultiTimeframeAggregateFunction#updateMarketSnapshot is
     // the only reader today. ---
     /** Day open. */
     public static final int OPEN_PAISE = 21;
@@ -75,12 +76,64 @@ public final class RawTableColumns {
     public static final int OPEN_INTEREST = 30;
     /** Level-1 best bid price. */
     public static final int BID_PX_1 = 31;
+    /** Level-2 bid price. */
+    public static final int BID_PX_2 = 32;
+    /** Level-3 bid price. */
+    public static final int BID_PX_3 = 33;
+    /** Level-4 bid price. */
+    public static final int BID_PX_4 = 34;
+    /** Level-5 bid price. */
+    public static final int BID_PX_5 = 35;
     /** Level-1 best bid quantity. */
     public static final int BID_QTY_1 = 36;
+    /** Level-2 bid quantity. */
+    public static final int BID_QTY_2 = 37;
+    /** Level-3 bid quantity. */
+    public static final int BID_QTY_3 = 38;
+    /** Level-4 bid quantity. */
+    public static final int BID_QTY_4 = 39;
+    /** Level-5 bid quantity. */
+    public static final int BID_QTY_5 = 40;
+    /** Level-1 bid order count. */
+    public static final int BID_ORD_1 = 41;
+    /** Level-2 bid order count. */
+    public static final int BID_ORD_2 = 42;
+    /** Level-3 bid order count. */
+    public static final int BID_ORD_3 = 43;
+    /** Level-4 bid order count. */
+    public static final int BID_ORD_4 = 44;
+    /** Level-5 bid order count. */
+    public static final int BID_ORD_5 = 45;
     /** Level-1 best ask price. */
     public static final int ASK_PX_1 = 46;
+    /** Level-2 ask price. */
+    public static final int ASK_PX_2 = 47;
+    /** Level-3 ask price. */
+    public static final int ASK_PX_3 = 48;
+    /** Level-4 ask price. */
+    public static final int ASK_PX_4 = 49;
+    /** Level-5 ask price. */
+    public static final int ASK_PX_5 = 50;
     /** Level-1 best ask quantity. */
     public static final int ASK_QTY_1 = 51;
+    /** Level-2 ask quantity. */
+    public static final int ASK_QTY_2 = 52;
+    /** Level-3 ask quantity. */
+    public static final int ASK_QTY_3 = 53;
+    /** Level-4 ask quantity. */
+    public static final int ASK_QTY_4 = 54;
+    /** Level-5 ask quantity. */
+    public static final int ASK_QTY_5 = 55;
+    /** Level-1 ask order count. */
+    public static final int ASK_ORD_1 = 56;
+    /** Level-2 ask order count. */
+    public static final int ASK_ORD_2 = 57;
+    /** Level-3 ask order count. */
+    public static final int ASK_ORD_3 = 58;
+    /** Level-4 ask order count. */
+    public static final int ASK_ORD_4 = 59;
+    /** Level-5 ask order count. */
+    public static final int ASK_ORD_5 = 60;
     /** OI day high (standard token stream only). */
     public static final int OI_DAY_HIGH = 62;
     /** OI day low (standard token stream only). */
@@ -145,9 +198,35 @@ public final class RawTableColumns {
         check(TOTAL_SELL_QTY == RawTableSchema.COLUMNS.indexOf("total_sell_qty"), "TOTAL_SELL_QTY");
         check(OPEN_INTEREST == RawTableSchema.COLUMNS.indexOf("open_interest"), "OPEN_INTEREST");
         check(BID_PX_1 == RawTableSchema.COLUMNS.indexOf("bid_px_1"), "BID_PX_1");
+        check(BID_PX_2 == RawTableSchema.COLUMNS.indexOf("bid_px_2"), "BID_PX_2");
+        check(BID_PX_3 == RawTableSchema.COLUMNS.indexOf("bid_px_3"), "BID_PX_3");
+        check(BID_PX_4 == RawTableSchema.COLUMNS.indexOf("bid_px_4"), "BID_PX_4");
+        check(BID_PX_5 == RawTableSchema.COLUMNS.indexOf("bid_px_5"), "BID_PX_5");
         check(BID_QTY_1 == RawTableSchema.COLUMNS.indexOf("bid_qty_1"), "BID_QTY_1");
+        check(BID_QTY_2 == RawTableSchema.COLUMNS.indexOf("bid_qty_2"), "BID_QTY_2");
+        check(BID_QTY_3 == RawTableSchema.COLUMNS.indexOf("bid_qty_3"), "BID_QTY_3");
+        check(BID_QTY_4 == RawTableSchema.COLUMNS.indexOf("bid_qty_4"), "BID_QTY_4");
+        check(BID_QTY_5 == RawTableSchema.COLUMNS.indexOf("bid_qty_5"), "BID_QTY_5");
+        check(BID_ORD_1 == RawTableSchema.COLUMNS.indexOf("bid_ord_1"), "BID_ORD_1");
+        check(BID_ORD_2 == RawTableSchema.COLUMNS.indexOf("bid_ord_2"), "BID_ORD_2");
+        check(BID_ORD_3 == RawTableSchema.COLUMNS.indexOf("bid_ord_3"), "BID_ORD_3");
+        check(BID_ORD_4 == RawTableSchema.COLUMNS.indexOf("bid_ord_4"), "BID_ORD_4");
+        check(BID_ORD_5 == RawTableSchema.COLUMNS.indexOf("bid_ord_5"), "BID_ORD_5");
         check(ASK_PX_1 == RawTableSchema.COLUMNS.indexOf("ask_px_1"), "ASK_PX_1");
+        check(ASK_PX_2 == RawTableSchema.COLUMNS.indexOf("ask_px_2"), "ASK_PX_2");
+        check(ASK_PX_3 == RawTableSchema.COLUMNS.indexOf("ask_px_3"), "ASK_PX_3");
+        check(ASK_PX_4 == RawTableSchema.COLUMNS.indexOf("ask_px_4"), "ASK_PX_4");
+        check(ASK_PX_5 == RawTableSchema.COLUMNS.indexOf("ask_px_5"), "ASK_PX_5");
         check(ASK_QTY_1 == RawTableSchema.COLUMNS.indexOf("ask_qty_1"), "ASK_QTY_1");
+        check(ASK_QTY_2 == RawTableSchema.COLUMNS.indexOf("ask_qty_2"), "ASK_QTY_2");
+        check(ASK_QTY_3 == RawTableSchema.COLUMNS.indexOf("ask_qty_3"), "ASK_QTY_3");
+        check(ASK_QTY_4 == RawTableSchema.COLUMNS.indexOf("ask_qty_4"), "ASK_QTY_4");
+        check(ASK_QTY_5 == RawTableSchema.COLUMNS.indexOf("ask_qty_5"), "ASK_QTY_5");
+        check(ASK_ORD_1 == RawTableSchema.COLUMNS.indexOf("ask_ord_1"), "ASK_ORD_1");
+        check(ASK_ORD_2 == RawTableSchema.COLUMNS.indexOf("ask_ord_2"), "ASK_ORD_2");
+        check(ASK_ORD_3 == RawTableSchema.COLUMNS.indexOf("ask_ord_3"), "ASK_ORD_3");
+        check(ASK_ORD_4 == RawTableSchema.COLUMNS.indexOf("ask_ord_4"), "ASK_ORD_4");
+        check(ASK_ORD_5 == RawTableSchema.COLUMNS.indexOf("ask_ord_5"), "ASK_ORD_5");
         check(OI_DAY_HIGH == RawTableSchema.COLUMNS.indexOf("oi_day_high"), "OI_DAY_HIGH");
         check(OI_DAY_LOW == RawTableSchema.COLUMNS.indexOf("oi_day_low"), "OI_DAY_LOW");
         check(LOWER_LIMIT_PAISE == RawTableSchema.COLUMNS.indexOf("lower_limit_paise"), "LOWER_LIMIT_PAISE");

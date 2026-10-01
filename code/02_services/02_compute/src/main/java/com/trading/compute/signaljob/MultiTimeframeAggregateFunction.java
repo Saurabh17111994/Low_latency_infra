@@ -311,26 +311,64 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         // reports compute.latency.ingest_to_strategy. Sentinel Long.MIN_VALUE
         // means unknown — never fabricated, never persisted.
         row.setField(CandleLiveColumns.INGEST_TS, acc.lastIngestTs);
-        // Strategy market snapshot (2026-10-01): latest known raw extras,
-        // captured from every accepted tick. 0 = never seen -> NULL (never a
-        // fabricated zero); see updateMarketSnapshot for the capture rules.
-        setNullableLong(row, CandleLiveColumns.MKT_TOTAL_BUY_QTY, state.lastTotalBuyQty);
-        setNullableLong(row, CandleLiveColumns.MKT_TOTAL_SELL_QTY, state.lastTotalSellQty);
-        setNullableLong(row, CandleLiveColumns.MKT_DAY_OPEN_PAISE, state.lastDayOpenPaise);
-        setNullableLong(row, CandleLiveColumns.MKT_DAY_HIGH_PAISE, state.lastDayHighPaise);
-        setNullableLong(row, CandleLiveColumns.MKT_DAY_LOW_PAISE, state.lastDayLowPaise);
-        setNullableLong(row, CandleLiveColumns.MKT_PREV_CLOSE_PAISE, state.lastPrevClosePaise);
-        setNullableLong(row, CandleLiveColumns.MKT_VWAP_PAISE, state.lastVwapPaise);
-        setNullableLong(row, CandleLiveColumns.MKT_OPEN_INTEREST, state.lastOpenInterest);
-        setNullableLong(row, CandleLiveColumns.MKT_OI_DAY_HIGH, state.lastOiDayHigh);
-        setNullableLong(row, CandleLiveColumns.MKT_OI_DAY_LOW, state.lastOiDayLow);
-        setNullableLong(row, CandleLiveColumns.MKT_BID_PX_1, state.lastBidPaise);
-        setNullableLong(row, CandleLiveColumns.MKT_BID_QTY_1, state.lastBidSize);
-        setNullableLong(row, CandleLiveColumns.MKT_ASK_PX_1, state.lastAskPaise);
-        setNullableLong(row, CandleLiveColumns.MKT_ASK_QTY_1, state.lastAskSize);
-        setNullableLong(row, CandleLiveColumns.MKT_LOWER_LIMIT_PAISE, state.lastLowerLimitPaise);
-        setNullableLong(row, CandleLiveColumns.MKT_UPPER_LIMIT_PAISE, state.lastUpperLimitPaise);
+        // Strategy market snapshot (2026-10-01 native design): 42 latest-known
+        // raw values + two change clocks. Canonical-row transport: only the
+        // FIFTEEN_S row carries the section (one row per accepted tick, not
+        // six — 352 B/tick instead of 2,112 B/tick), so the host decodes it
+        // once and refreshes the shared per-instrument MarketSnapshot.
+        // 0 = never seen -> NULL (never a fabricated zero).
+        if (tf == Timeframe.FIFTEEN_S) {
+            writeMarketSection(row, state.market);
+        }
         return row;
+    }
+
+    /** Writes the 44-column market section (42 values + 2 clocks) onto the canonical row. */
+    private static void writeMarketSection(GenericRowData row, MarketSnapshot m) {
+        setNullableLong(row, CandleLiveColumns.MKT_TOTAL_BUY_QTY, m.totalBuyQty);
+        setNullableLong(row, CandleLiveColumns.MKT_TOTAL_SELL_QTY, m.totalSellQty);
+        setNullableLong(row, CandleLiveColumns.MKT_DAY_OPEN_PAISE, m.dayOpenPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_DAY_HIGH_PAISE, m.dayHighPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_DAY_LOW_PAISE, m.dayLowPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_PREV_CLOSE_PAISE, m.prevClosePaise);
+        setNullableLong(row, CandleLiveColumns.MKT_VWAP_PAISE, m.vwapPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_OPEN_INTEREST, m.openInterest);
+        setNullableLong(row, CandleLiveColumns.MKT_OI_DAY_HIGH, m.oiDayHigh);
+        setNullableLong(row, CandleLiveColumns.MKT_OI_DAY_LOW, m.oiDayLow);
+        setNullableLong(row, CandleLiveColumns.MKT_LOWER_LIMIT_PAISE, m.lowerLimitPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_UPPER_LIMIT_PAISE, m.upperLimitPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_PX_1, m.bidPx1);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_PX_2, m.bidPx2);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_PX_3, m.bidPx3);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_PX_4, m.bidPx4);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_PX_5, m.bidPx5);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_QTY_1, m.bidQty1);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_QTY_2, m.bidQty2);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_QTY_3, m.bidQty3);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_QTY_4, m.bidQty4);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_QTY_5, m.bidQty5);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_ORD_1, m.bidOrd1);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_ORD_2, m.bidOrd2);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_ORD_3, m.bidOrd3);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_ORD_4, m.bidOrd4);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_ORD_5, m.bidOrd5);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_PX_1, m.askPx1);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_PX_2, m.askPx2);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_PX_3, m.askPx3);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_PX_4, m.askPx4);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_PX_5, m.askPx5);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_QTY_1, m.askQty1);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_QTY_2, m.askQty2);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_QTY_3, m.askQty3);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_QTY_4, m.askQty4);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_QTY_5, m.askQty5);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_ORD_1, m.askOrd1);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_ORD_2, m.askOrd2);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_ORD_3, m.askOrd3);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_ORD_4, m.askOrd4);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_ORD_5, m.askOrd5);
+        setNullableLong(row, CandleLiveColumns.MKT_STATS_CHANGED_AT, m.statsChangedAt);
+        setNullableLong(row, CandleLiveColumns.MKT_DEPTH_CHANGED_AT, m.depthChangedAt);
     }
 
     /** BIGINT NULL transport helper: 0 means "not yet seen" (the row carries NULL). */
@@ -343,83 +381,169 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     }
 
     /**
-     * Strategy market snapshot capture (2026-10-01): read the 16 raw extras
-     * strategies consume from every accepted tick — trade or quote. Latest
-     * non-null wins per field: a tick that does not carry a field (lighter
-     * feed mode, other tick type) never erases the last known value, and a
-     * field never seen stays 0 (rendered NULL on the forming row). Quote ticks
-     * update the snapshot but still emit no forming row and never touch OHLC;
-     * the next accepted trade tick carries the fresh values.
+     * Strategy market snapshot capture (2026-10-01 native design): read the
+     * 42 raw market values strategies consume from every accepted tick —
+     * trade or quote. Latest non-null wins per field: a tick that does not
+     * carry a field (lighter feed mode, other tick type) never erases the
+     * last known value, and a field never seen stays 0 (rendered NULL on the
+     * forming row). Quote ticks update the snapshot but still emit no forming
+     * row and never touch OHLC; the next accepted trade tick carries the
+     * fresh values on its canonical FIFTEEN_S row.
+     *
+     * <p>The two clocks are change clocks: {@code statsChangedAt} advances
+     * only when one of the 12 stats values actually differs from the stored
+     * one, {@code depthChangedAt} only for the 30 depth values. A feed
+     * repeating the same book leaves both clocks alone — the age a strategy
+     * reads is "time since this group last moved". A field that is 0 on the
+     * wire follows the 0 = unknown convention and never moves a clock.
      */
     private static void updateMarketSnapshot(MultiTimeframeState state, RowData tick, long eventTime) {
-        boolean updated = false;
-        if (!tick.isNullAt(RawTableColumns.TOTAL_BUY_QTY)) {
-            state.lastTotalBuyQty = tick.getLong(RawTableColumns.TOTAL_BUY_QTY);
-            updated = true;
+        MarketSnapshot m = state.market;
+        boolean statsChanged = false;
+        boolean depthChanged = false;
+
+        // ── stats (12) ───────────────────────────────────────────────────
+        long v;
+        if ((v = longOr(tick, RawTableColumns.TOTAL_BUY_QTY, m.totalBuyQty)) != m.totalBuyQty) {
+            m.totalBuyQty = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.TOTAL_SELL_QTY)) {
-            state.lastTotalSellQty = tick.getLong(RawTableColumns.TOTAL_SELL_QTY);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.TOTAL_SELL_QTY, m.totalSellQty)) != m.totalSellQty) {
+            m.totalSellQty = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.OPEN_PAISE)) {
-            state.lastDayOpenPaise = tick.getLong(RawTableColumns.OPEN_PAISE);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.OPEN_PAISE, m.dayOpenPaise)) != m.dayOpenPaise) {
+            m.dayOpenPaise = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.HIGH_PAISE)) {
-            state.lastDayHighPaise = tick.getLong(RawTableColumns.HIGH_PAISE);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.HIGH_PAISE, m.dayHighPaise)) != m.dayHighPaise) {
+            m.dayHighPaise = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.LOW_PAISE)) {
-            state.lastDayLowPaise = tick.getLong(RawTableColumns.LOW_PAISE);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.LOW_PAISE, m.dayLowPaise)) != m.dayLowPaise) {
+            m.dayLowPaise = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.CLOSE_PAISE)) {
-            state.lastPrevClosePaise = tick.getLong(RawTableColumns.CLOSE_PAISE);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.CLOSE_PAISE, m.prevClosePaise)) != m.prevClosePaise) {
+            m.prevClosePaise = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.VWAP_PAISE)) {
-            state.lastVwapPaise = tick.getLong(RawTableColumns.VWAP_PAISE);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.VWAP_PAISE, m.vwapPaise)) != m.vwapPaise) {
+            m.vwapPaise = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.OPEN_INTEREST)) {
-            state.lastOpenInterest = tick.getLong(RawTableColumns.OPEN_INTEREST);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.OPEN_INTEREST, m.openInterest)) != m.openInterest) {
+            m.openInterest = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.OI_DAY_HIGH)) {
-            state.lastOiDayHigh = tick.getLong(RawTableColumns.OI_DAY_HIGH);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.OI_DAY_HIGH, m.oiDayHigh)) != m.oiDayHigh) {
+            m.oiDayHigh = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.OI_DAY_LOW)) {
-            state.lastOiDayLow = tick.getLong(RawTableColumns.OI_DAY_LOW);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.OI_DAY_LOW, m.oiDayLow)) != m.oiDayLow) {
+            m.oiDayLow = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.BID_PX_1)) {
-            state.lastBidPaise = tick.getLong(RawTableColumns.BID_PX_1);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.LOWER_LIMIT_PAISE, m.lowerLimitPaise)) != m.lowerLimitPaise) {
+            m.lowerLimitPaise = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.BID_QTY_1)) {
-            state.lastBidSize = tick.getLong(RawTableColumns.BID_QTY_1);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.UPPER_LIMIT_PAISE, m.upperLimitPaise)) != m.upperLimitPaise) {
+            m.upperLimitPaise = v; statsChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.ASK_PX_1)) {
-            state.lastAskPaise = tick.getLong(RawTableColumns.ASK_PX_1);
-            updated = true;
+
+        // ── depth ladder (30): bid px/qty/ord 1..5, then ask px/qty/ord 1..5
+        if ((v = longOr(tick, RawTableColumns.BID_PX_1, m.bidPx1)) != m.bidPx1) {
+            m.bidPx1 = v; depthChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.ASK_QTY_1)) {
-            state.lastAskSize = tick.getLong(RawTableColumns.ASK_QTY_1);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.BID_PX_2, m.bidPx2)) != m.bidPx2) {
+            m.bidPx2 = v; depthChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.LOWER_LIMIT_PAISE)) {
-            state.lastLowerLimitPaise = tick.getLong(RawTableColumns.LOWER_LIMIT_PAISE);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.BID_PX_3, m.bidPx3)) != m.bidPx3) {
+            m.bidPx3 = v; depthChanged = true;
         }
-        if (!tick.isNullAt(RawTableColumns.UPPER_LIMIT_PAISE)) {
-            state.lastUpperLimitPaise = tick.getLong(RawTableColumns.UPPER_LIMIT_PAISE);
-            updated = true;
+        if ((v = longOr(tick, RawTableColumns.BID_PX_4, m.bidPx4)) != m.bidPx4) {
+            m.bidPx4 = v; depthChanged = true;
         }
-        if (updated) {
-            state.lastQuoteEventTime = eventTime;
+        if ((v = longOr(tick, RawTableColumns.BID_PX_5, m.bidPx5)) != m.bidPx5) {
+            m.bidPx5 = v; depthChanged = true;
         }
+        if ((v = longOr(tick, RawTableColumns.BID_QTY_1, m.bidQty1)) != m.bidQty1) {
+            m.bidQty1 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.BID_QTY_2, m.bidQty2)) != m.bidQty2) {
+            m.bidQty2 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.BID_QTY_3, m.bidQty3)) != m.bidQty3) {
+            m.bidQty3 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.BID_QTY_4, m.bidQty4)) != m.bidQty4) {
+            m.bidQty4 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.BID_QTY_5, m.bidQty5)) != m.bidQty5) {
+            m.bidQty5 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.BID_ORD_1, m.bidOrd1)) != m.bidOrd1) {
+            m.bidOrd1 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.BID_ORD_2, m.bidOrd2)) != m.bidOrd2) {
+            m.bidOrd2 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.BID_ORD_3, m.bidOrd3)) != m.bidOrd3) {
+            m.bidOrd3 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.BID_ORD_4, m.bidOrd4)) != m.bidOrd4) {
+            m.bidOrd4 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.BID_ORD_5, m.bidOrd5)) != m.bidOrd5) {
+            m.bidOrd5 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_PX_1, m.askPx1)) != m.askPx1) {
+            m.askPx1 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_PX_2, m.askPx2)) != m.askPx2) {
+            m.askPx2 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_PX_3, m.askPx3)) != m.askPx3) {
+            m.askPx3 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_PX_4, m.askPx4)) != m.askPx4) {
+            m.askPx4 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_PX_5, m.askPx5)) != m.askPx5) {
+            m.askPx5 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_QTY_1, m.askQty1)) != m.askQty1) {
+            m.askQty1 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_QTY_2, m.askQty2)) != m.askQty2) {
+            m.askQty2 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_QTY_3, m.askQty3)) != m.askQty3) {
+            m.askQty3 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_QTY_4, m.askQty4)) != m.askQty4) {
+            m.askQty4 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_QTY_5, m.askQty5)) != m.askQty5) {
+            m.askQty5 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_ORD_1, m.askOrd1)) != m.askOrd1) {
+            m.askOrd1 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_ORD_2, m.askOrd2)) != m.askOrd2) {
+            m.askOrd2 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_ORD_3, m.askOrd3)) != m.askOrd3) {
+            m.askOrd3 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_ORD_4, m.askOrd4)) != m.askOrd4) {
+            m.askOrd4 = v; depthChanged = true;
+        }
+        if ((v = longOr(tick, RawTableColumns.ASK_ORD_5, m.askOrd5)) != m.askOrd5) {
+            m.askOrd5 = v; depthChanged = true;
+        }
+
+        if (statsChanged) {
+            m.statsChangedAt = eventTime;
+        }
+        if (depthChanged) {
+            m.depthChangedAt = eventTime;
+        }
+    }
+
+    /** NULL means "this tick does not carry the field": keep the stored value. */
+    private static long longOr(RowData tick, int index, long fallback) {
+        return tick.isNullAt(index) ? fallback : tick.getLong(index);
     }
 
     @Override

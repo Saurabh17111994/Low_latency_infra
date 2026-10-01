@@ -25,13 +25,20 @@ import org.apache.flink.table.types.logical.VarCharType;
  * and is not part of the pinned DDL prefix.
  *
  * <p>The trailing {@link #MARKET_SECTION_START}..{@link #FIELD_COUNT}-1
- * section is the strategy market snapshot (2026-10-01): the latest known raw
- * extras — level-1 quote, day stats, limits — captured by the aggregator from
- * every accepted tick (trade or quote) and carried on each forming row so
- * strategies can read them in {@code onLiveTick}. Null means "this feed did
- * not provide the field" (never zero), and a value is latest-known, not
- * necessarily from the tick that formed the row. Transport-only: never
- * persisted, absent from every DDL.
+ * section is the strategy market snapshot (2026-10-01 native design): the 42
+ * latest-known raw market values — 12 day/flow stats and the 30-column depth
+ * ladder (5 levels × price/qty/order-count × 2 sides) — plus two change
+ * clocks ({@link #MKT_STATS_CHANGED_AT}, {@link #MKT_DEPTH_CHANGED_AT}),
+ * captured by the aggregator from every accepted tick (trade or quote).
+ * Null means "this feed did not provide the field" (never zero), and a value
+ * is latest-known, not necessarily from the tick that formed the row.
+ *
+ * <p><b>Canonical-row transport (2026-10-01).</b> The section is written
+ * only on the {@code FIFTEEN_S} forming row — the first row emitted for every
+ * accepted tick — so one row per tick carries it instead of six. The host
+ * decodes it on that row only and refreshes the per-instrument
+ * {@link MarketSnapshot}; strategies read the shared {@link MarketView} on
+ * every callback. Transport-only: never persisted, absent from every DDL.
  *
  * <p>Phase 0 multi-TF aggregator contract: tf discriminator values are
  * {@code FIFTEEN_S, THIRTY_S, ONE_M, THREE_M, FIVE_M, FIFTEEN_M}.
@@ -65,6 +72,8 @@ public final class CandleLiveColumns {
     // ── market snapshot section (transport-only; see class javadoc) ──────
     /** First market-snapshot index — immediately after the ingest probe. */
     public static final int MARKET_SECTION_START = 16;
+
+    // stats (12)
     public static final int MKT_TOTAL_BUY_QTY = 16;
     public static final int MKT_TOTAL_SELL_QTY = 17;
     public static final int MKT_DAY_OPEN_PAISE = 18;
@@ -75,17 +84,49 @@ public final class CandleLiveColumns {
     public static final int MKT_OPEN_INTEREST = 23;
     public static final int MKT_OI_DAY_HIGH = 24;
     public static final int MKT_OI_DAY_LOW = 25;
-    public static final int MKT_BID_PX_1 = 26;
-    public static final int MKT_BID_QTY_1 = 27;
-    public static final int MKT_ASK_PX_1 = 28;
-    public static final int MKT_ASK_QTY_1 = 29;
-    public static final int MKT_LOWER_LIMIT_PAISE = 30;
-    public static final int MKT_UPPER_LIMIT_PAISE = 31;
+    public static final int MKT_LOWER_LIMIT_PAISE = 26;
+    public static final int MKT_UPPER_LIMIT_PAISE = 27;
 
-    /** Number of market-snapshot columns. */
-    public static final int MARKET_FIELD_COUNT = 16;
+    // depth ladder (30): bid px/qty/ord 1..5, then ask px/qty/ord 1..5
+    public static final int MKT_BID_PX_1 = 28;
+    public static final int MKT_BID_PX_2 = 29;
+    public static final int MKT_BID_PX_3 = 30;
+    public static final int MKT_BID_PX_4 = 31;
+    public static final int MKT_BID_PX_5 = 32;
+    public static final int MKT_BID_QTY_1 = 33;
+    public static final int MKT_BID_QTY_2 = 34;
+    public static final int MKT_BID_QTY_3 = 35;
+    public static final int MKT_BID_QTY_4 = 36;
+    public static final int MKT_BID_QTY_5 = 37;
+    public static final int MKT_BID_ORD_1 = 38;
+    public static final int MKT_BID_ORD_2 = 39;
+    public static final int MKT_BID_ORD_3 = 40;
+    public static final int MKT_BID_ORD_4 = 41;
+    public static final int MKT_BID_ORD_5 = 42;
+    public static final int MKT_ASK_PX_1 = 43;
+    public static final int MKT_ASK_PX_2 = 44;
+    public static final int MKT_ASK_PX_3 = 45;
+    public static final int MKT_ASK_PX_4 = 46;
+    public static final int MKT_ASK_PX_5 = 47;
+    public static final int MKT_ASK_QTY_1 = 48;
+    public static final int MKT_ASK_QTY_2 = 49;
+    public static final int MKT_ASK_QTY_3 = 50;
+    public static final int MKT_ASK_QTY_4 = 51;
+    public static final int MKT_ASK_QTY_5 = 52;
+    public static final int MKT_ASK_ORD_1 = 53;
+    public static final int MKT_ASK_ORD_2 = 54;
+    public static final int MKT_ASK_ORD_3 = 55;
+    public static final int MKT_ASK_ORD_4 = 56;
+    public static final int MKT_ASK_ORD_5 = 57;
 
-    public static final int FIELD_COUNT = 32;
+    // change clocks (2)
+    public static final int MKT_STATS_CHANGED_AT = 58;
+    public static final int MKT_DEPTH_CHANGED_AT = 59;
+
+    /** Number of market-snapshot columns (42 values + 2 clocks). */
+    public static final int MARKET_FIELD_COUNT = 44;
+
+    public static final int FIELD_COUNT = 60;
 
     /** Leading columns pinned to the merged-table DDL prefix; probes follow. */
     public static final int DDL_FIELD_COUNT = 15;
@@ -99,6 +140,13 @@ public final class CandleLiveColumns {
             "BIGINT", "BIGINT", "BIGINT", "BIGINT",
             "BIGINT", "INTEGER", "BIGINT", "STRING", "STRING",
             "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
             "BIGINT", "BIGINT", "BIGINT", "BIGINT",
             "BIGINT", "BIGINT", "BIGINT", "BIGINT",
             "BIGINT", "BIGINT", "BIGINT", "BIGINT",
@@ -118,6 +166,13 @@ public final class CandleLiveColumns {
             true, true, true, true,
             true, true, true, true,
             true, true, true, true,
+            true, true, true, true,
+            true, true, true, true,
+            true, true, true, true,
+            true, true, true, true,
+            true, true, true, true,
+            true, true, true, true,
+            true, true, true, true,
             true, true, true, true);
 
     /** DDL column names in index order (diagnostics + agreement pin). */
@@ -132,8 +187,14 @@ public final class CandleLiveColumns {
             "mkt_day_open_paise", "mkt_day_high_paise", "mkt_day_low_paise",
             "mkt_prev_close_paise", "mkt_vwap_paise",
             "mkt_open_interest", "mkt_oi_day_high", "mkt_oi_day_low",
-            "mkt_bid_px_1", "mkt_bid_qty_1", "mkt_ask_px_1", "mkt_ask_qty_1",
-            "mkt_lower_limit_paise", "mkt_upper_limit_paise"
+            "mkt_lower_limit_paise", "mkt_upper_limit_paise",
+            "mkt_bid_px_1", "mkt_bid_px_2", "mkt_bid_px_3", "mkt_bid_px_4", "mkt_bid_px_5",
+            "mkt_bid_qty_1", "mkt_bid_qty_2", "mkt_bid_qty_3", "mkt_bid_qty_4", "mkt_bid_qty_5",
+            "mkt_bid_ord_1", "mkt_bid_ord_2", "mkt_bid_ord_3", "mkt_bid_ord_4", "mkt_bid_ord_5",
+            "mkt_ask_px_1", "mkt_ask_px_2", "mkt_ask_px_3", "mkt_ask_px_4", "mkt_ask_px_5",
+            "mkt_ask_qty_1", "mkt_ask_qty_2", "mkt_ask_qty_3", "mkt_ask_qty_4", "mkt_ask_qty_5",
+            "mkt_ask_ord_1", "mkt_ask_ord_2", "mkt_ask_ord_3", "mkt_ask_ord_4", "mkt_ask_ord_5",
+            "mkt_stats_changed_at", "mkt_depth_changed_at"
     };
 
     /** Immutable DDL column names in index order (diagnostics + agreement pin). */
@@ -148,8 +209,14 @@ public final class CandleLiveColumns {
             "mkt_day_open_paise", "mkt_day_high_paise", "mkt_day_low_paise",
             "mkt_prev_close_paise", "mkt_vwap_paise",
             "mkt_open_interest", "mkt_oi_day_high", "mkt_oi_day_low",
-            "mkt_bid_px_1", "mkt_bid_qty_1", "mkt_ask_px_1", "mkt_ask_qty_1",
-            "mkt_lower_limit_paise", "mkt_upper_limit_paise");
+            "mkt_lower_limit_paise", "mkt_upper_limit_paise",
+            "mkt_bid_px_1", "mkt_bid_px_2", "mkt_bid_px_3", "mkt_bid_px_4", "mkt_bid_px_5",
+            "mkt_bid_qty_1", "mkt_bid_qty_2", "mkt_bid_qty_3", "mkt_bid_qty_4", "mkt_bid_qty_5",
+            "mkt_bid_ord_1", "mkt_bid_ord_2", "mkt_bid_ord_3", "mkt_bid_ord_4", "mkt_bid_ord_5",
+            "mkt_ask_px_1", "mkt_ask_px_2", "mkt_ask_px_3", "mkt_ask_px_4", "mkt_ask_px_5",
+            "mkt_ask_qty_1", "mkt_ask_qty_2", "mkt_ask_qty_3", "mkt_ask_qty_4", "mkt_ask_qty_5",
+            "mkt_ask_ord_1", "mkt_ask_ord_2", "mkt_ask_ord_3", "mkt_ask_ord_4", "mkt_ask_ord_5",
+            "mkt_stats_changed_at", "mkt_depth_changed_at");
 
     /** Stream type info for emitted candle_live rows (v1 DDL order). */
     public static final InternalTypeInfo<RowData> ROW_TYPE_INFO = InternalTypeInfo.ofFields(
@@ -170,7 +237,21 @@ public final class CandleLiveColumns {
                 new VarCharType(VarCharType.MAX_LENGTH),     // last_event_fingerprint (nullable)
                 new VarCharType(false, VarCharType.MAX_LENGTH), // schema_version (NOT NULL)
                 new BigIntType(false),                       // ingest_ts probe (NOT NULL set on emit)
-                new BigIntType(true), new BigIntType(true),  // market snapshot: nullable
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
                 new BigIntType(true), new BigIntType(true),
                 new BigIntType(true), new BigIntType(true),
                 new BigIntType(true), new BigIntType(true),
@@ -220,12 +301,40 @@ public final class CandleLiveColumns {
         checkIndex(MKT_OPEN_INTEREST, "mkt_open_interest");
         checkIndex(MKT_OI_DAY_HIGH, "mkt_oi_day_high");
         checkIndex(MKT_OI_DAY_LOW, "mkt_oi_day_low");
-        checkIndex(MKT_BID_PX_1, "mkt_bid_px_1");
-        checkIndex(MKT_BID_QTY_1, "mkt_bid_qty_1");
-        checkIndex(MKT_ASK_PX_1, "mkt_ask_px_1");
-        checkIndex(MKT_ASK_QTY_1, "mkt_ask_qty_1");
         checkIndex(MKT_LOWER_LIMIT_PAISE, "mkt_lower_limit_paise");
         checkIndex(MKT_UPPER_LIMIT_PAISE, "mkt_upper_limit_paise");
+        checkIndex(MKT_BID_PX_1, "mkt_bid_px_1");
+        checkIndex(MKT_BID_PX_2, "mkt_bid_px_2");
+        checkIndex(MKT_BID_PX_3, "mkt_bid_px_3");
+        checkIndex(MKT_BID_PX_4, "mkt_bid_px_4");
+        checkIndex(MKT_BID_PX_5, "mkt_bid_px_5");
+        checkIndex(MKT_BID_QTY_1, "mkt_bid_qty_1");
+        checkIndex(MKT_BID_QTY_2, "mkt_bid_qty_2");
+        checkIndex(MKT_BID_QTY_3, "mkt_bid_qty_3");
+        checkIndex(MKT_BID_QTY_4, "mkt_bid_qty_4");
+        checkIndex(MKT_BID_QTY_5, "mkt_bid_qty_5");
+        checkIndex(MKT_BID_ORD_1, "mkt_bid_ord_1");
+        checkIndex(MKT_BID_ORD_2, "mkt_bid_ord_2");
+        checkIndex(MKT_BID_ORD_3, "mkt_bid_ord_3");
+        checkIndex(MKT_BID_ORD_4, "mkt_bid_ord_4");
+        checkIndex(MKT_BID_ORD_5, "mkt_bid_ord_5");
+        checkIndex(MKT_ASK_PX_1, "mkt_ask_px_1");
+        checkIndex(MKT_ASK_PX_2, "mkt_ask_px_2");
+        checkIndex(MKT_ASK_PX_3, "mkt_ask_px_3");
+        checkIndex(MKT_ASK_PX_4, "mkt_ask_px_4");
+        checkIndex(MKT_ASK_PX_5, "mkt_ask_px_5");
+        checkIndex(MKT_ASK_QTY_1, "mkt_ask_qty_1");
+        checkIndex(MKT_ASK_QTY_2, "mkt_ask_qty_2");
+        checkIndex(MKT_ASK_QTY_3, "mkt_ask_qty_3");
+        checkIndex(MKT_ASK_QTY_4, "mkt_ask_qty_4");
+        checkIndex(MKT_ASK_QTY_5, "mkt_ask_qty_5");
+        checkIndex(MKT_ASK_ORD_1, "mkt_ask_ord_1");
+        checkIndex(MKT_ASK_ORD_2, "mkt_ask_ord_2");
+        checkIndex(MKT_ASK_ORD_3, "mkt_ask_ord_3");
+        checkIndex(MKT_ASK_ORD_4, "mkt_ask_ord_4");
+        checkIndex(MKT_ASK_ORD_5, "mkt_ask_ord_5");
+        checkIndex(MKT_STATS_CHANGED_AT, "mkt_stats_changed_at");
+        checkIndex(MKT_DEPTH_CHANGED_AT, "mkt_depth_changed_at");
         if (MARKET_SECTION_START != INGEST_TS + 1
                 || MARKET_FIELD_COUNT != FIELD_COUNT - MARKET_SECTION_START) {
             throw new IllegalStateException(
