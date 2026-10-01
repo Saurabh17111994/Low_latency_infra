@@ -3,7 +3,7 @@
 
 Gate-discovered (test_*.py). Fails when:
   - the probe source stops being compiled into the ingestion image,
-  - the runtime stage stops carrying the probe class,
+  - the runtime stage stops carrying every probe class,
   - day_run regresses to host `javac` + `target/cp.txt`,
   - the probe starts reaching Fluss over localhost instead of compose service DNS.
 """
@@ -32,12 +32,20 @@ class IngestionProbeImageTest(unittest.TestCase):
             "the probe must compile against the shaded ingestion jar",
         )
 
-    def test_runtime_stage_carries_the_probe_class(self) -> None:
+    def test_runtime_stage_carries_every_probe_class(self) -> None:
         text = DOCKERFILE.read_text(encoding="utf-8")
         self.assertIn(
-            "COPY --from=java-builder /probe-classes/FlussReadLagProbe.class /app/probe/",
+            "COPY --from=java-builder /probe-classes/ /app/probe/",
             text,
-            "the runtime stage must ship /app/probe/FlussReadLagProbe.class",
+            "the runtime stage must ship every compiled probe class: the probe "
+            "loads its nested InputException at startup, so copying only "
+            "FlussReadLagProbe.class crashes it with "
+            "NoClassDefFoundError: FlussReadLagProbe$InputException",
+        )
+        self.assertNotIn(
+            "/probe-classes/FlussReadLagProbe.class /app/probe/",
+            text,
+            "a single-class copy drops the nested classes the probe loads",
         )
 
     def test_day_run_probes_through_the_container(self) -> None:

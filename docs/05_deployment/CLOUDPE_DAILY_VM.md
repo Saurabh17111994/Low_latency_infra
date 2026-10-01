@@ -74,7 +74,7 @@ What it does — and does not do:
 
 The script warns when the project image set is missing; that is what §2.4 loads. `--check`
 additionally proves the in-image toolchain before you snapshot — the ingestion JDK and
-`/app/probe/FlussReadLagProbe.class`, the EOD image's java + controller + m2 repo, and the
+the `/app/probe/` Fluss probe classes (`FlussReadLagProbe` plus its nested `FlussReadLagProbe$InputException`), the EOD image's java + controller + m2 repo, and the
 `.env.vm` runner/fresh-start/stop-gate keys — so a snapshot that boots a VM unable to run the day
 fails here instead of at 09:15. Since CHG-493 it also proves the runtime artifacts the stack
 bind-mounts: the `Arrow_broker` manifest tree, `code/02_services/02_compute/target/compute.jar`,

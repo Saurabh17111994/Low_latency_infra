@@ -97,8 +97,8 @@ if [ "$CHECK" = 1 ]; then
   docker run --rm --entrypoint java 01_docker-ingestion -version >/dev/null 2>&1 \
     || fail "--check: java missing in the ingestion image"
   docker run --rm --entrypoint sh 01_docker-ingestion \
-    -c 'test -f /app/probe/FlussReadLagProbe.class' >/dev/null 2>&1 \
-    || fail "--check: /app/probe/FlussReadLagProbe.class missing in the ingestion image"
+    -c 'test -f /app/probe/FlussReadLagProbe.class && test -f "/app/probe/FlussReadLagProbe\$InputException.class"' >/dev/null 2>&1 \
+    || fail "--check: the Fluss probe classes are missing in the ingestion image (nested InputException included)"
   docker run --rm --entrypoint sh 01_docker-eod-controller \
     -c 'java -version >/dev/null 2>&1 && test -f /app/code/01_platform/04_scripts/eod_controller.py && test -d /opt/ddl-apply/m2/repository' \
     >/dev/null 2>&1 \

@@ -44,8 +44,11 @@ FROM eclipse-temurin:17-jre@sha256:13cc28a6cc72a38ce1f00c906be3580c1a3e604b8984d
 WORKDIR /app
 COPY --from=go-builder /arrow-bridge /app/arrow-bridge
 COPY --from=java-builder /src/02_services/01_ingestion/target/ingestion.jar /app/ingestion.jar
-# C3-1: the probe class the daily runner execs inside this container.
-COPY --from=java-builder /probe-classes/FlussReadLagProbe.class /app/probe/
+# C3-1: the probe classes the daily runner execs inside this container.
+# Copy the whole compile output: the probe loads its nested InputException at
+# startup, so shipping only FlussReadLagProbe.class crashes with
+# NoClassDefFoundError: FlussReadLagProbe$InputException (observed 2026-10-02).
+COPY --from=java-builder /probe-classes/ /app/probe/
 COPY 02_services/01_ingestion/docker-entrypoint.sh /app/docker-entrypoint.sh
 # 2026-08-22 single-pane: OTel Javaagent for JVM metrics (jvm.*) → collector.
 # Agent is downloaded at build so image stays self-contained; same endpoint as gateway.

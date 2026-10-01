@@ -61,7 +61,8 @@ class VmGoldenRecipeTests(unittest.TestCase):
         text = SCRIPT.read_text()
         for probe in (
             "--entrypoint java",
-            "test -f /app/probe/FlussReadLagProbe.class'",
+            "test -f /app/probe/FlussReadLagProbe.class",
+            "FlussReadLagProbe\\$InputException.class",
             "test -f /app/code/01_platform/04_scripts/eod_controller.py",
             "test -d /opt/ddl-apply/m2/repository'",
             "eod_controller.py --help",
