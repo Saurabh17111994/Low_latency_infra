@@ -161,6 +161,13 @@ public class StrategyHostFunction
     /** In-memory signal-read age: tick event-time -> strategy evaluation (low-latency KPI). */
     private transient Histogram liveAge;
 
+    /**
+     * Platform-speed KPI (2026-10-01): ingestion accept wall-clock
+     * ({@code raw.ingest_ts}, carried on the forming row) -> strategy
+     * evaluation. Feed-independent, unlike {@link #liveAge}.
+     */
+    private transient Histogram ingestToStrategy;
+
     /** DEC-056 feature-layer counters (per subtask). */
     private transient Counter featureTickUpdates;
     private transient Counter featureCloseUpdates;
@@ -230,6 +237,11 @@ public class StrategyHostFunction
         // compute.latency.ingest_to_monitor.
         liveAge = getRuntimeContext().getMetricGroup()
                 .histogram("compute.latency.tick_to_strategy", LatencyHistograms.create());
+        // Platform-speed KPI (2026-10-01): ingestion accept (raw.ingest_ts,
+        // carried on the forming row by the aggregator) -> in-memory signal
+        // read. Skips unset/clock-skewed probes (see updateIngestToStrategy).
+        ingestToStrategy = getRuntimeContext().getMetricGroup()
+                .histogram("compute.latency.ingest_to_strategy", LatencyHistograms.create());
         featureTickUpdates =
                 getRuntimeContext().getMetricGroup().counter("compute.features.updates.tick");
         featureCloseUpdates =
@@ -303,6 +315,14 @@ public class StrategyHostFunction
         if (canonicalTick && liveAge != null && evtTime > 0L) {
             liveAge.update(Math.max(0L, System.currentTimeMillis() - evtTime));
         }
+        // Platform-speed KPI (2026-10-01): same canonical row, but anchored at
+        // our own accept time — the feed-independent "how fast are we" number.
+        if (canonicalTick && ingestToStrategy != null
+                && !live.isNullAt(CandleLiveColumns.INGEST_TS)) {
+            updateIngestToStrategy(ingestToStrategy,
+                    live.getLong(CandleLiveColumns.INGEST_TS),
+                    System.currentTimeMillis());
+        }
         // DEC-056: features update before the fan-out so every strategy reads the
         // fresh value; a failing feature update is counted, never blocks delivery.
         // (Inside, only FIFTEEN_S updates the timeframe-independent tick features.)
@@ -329,6 +349,18 @@ public class StrategyHostFunction
         // pinned to the canonical FIFTEEN_S row.
         if (contextProvider != null) {
             trackPendingContext(ctx.getCurrentKey(), live, ctx.timerService());
+        }
+    }
+
+    /**
+     * Guarded {@code compute.latency.ingest_to_strategy} update (platform-speed
+     * KPI): skips an unset probe (sentinel/non-positive) and a clock-skewed
+     * sample ({@code now < ingestTs}) — the same fail-safe shape as the step-2
+     * monitor. Package-private for the unit guard test.
+     */
+    static void updateIngestToStrategy(Histogram histogram, long ingestTs, long now) {
+        if (histogram != null && ingestTs > 0L && now >= ingestTs) {
+            histogram.update(now - ingestTs);
         }
     }
 

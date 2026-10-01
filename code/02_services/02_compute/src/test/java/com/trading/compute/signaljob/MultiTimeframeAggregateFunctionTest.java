@@ -146,6 +146,69 @@ class MultiTimeframeAggregateFunctionTest {
     }
 
     @Test
+    @DisplayName("platform KPI probe: forming rows carry the close-setting tick's ingest_ts (missing keeps the previous)")
+    void formingRowsCarryIngestTs() throws Exception {
+        fn = new MultiTimeframeAggregateFunction(LIVE_INTERVAL, false, true, true);
+        harness = ProcessFunctionTestHarnesses.forKeyedProcessFunction(
+                fn,
+                row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN),
+                Types.LONG);
+        harness.open();
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0);
+
+        harness.processElement(TestRawRows.withIngestTs(
+                trade(T0 + 1_000L, "fp-in-1", 100_00L, 10L), 111_000L), T0 + 1_000L);
+        harness.processElement(TestRawRows.withIngestTs(
+                trade(T0 + 2_000L, "fp-in-2", 101_00L, 5L), 222_000L), T0 + 2_000L);
+
+        List<RowData> fast = new ArrayList<>();
+        harness.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TICK_TAG)
+                .forEach(r -> fast.add(r.getValue()));
+        assertEquals(12, fast.size(), "six forming rows per accepted trade tick");
+        for (int i = 0; i < 6; i++) {
+            assertEquals(111_000L, fast.get(i).getLong(CandleLiveColumns.INGEST_TS),
+                    "first tick's forming row must carry its accept time (row " + i + ")");
+        }
+        for (int i = 6; i < 12; i++) {
+            assertEquals(222_000L, fast.get(i).getLong(CandleLiveColumns.INGEST_TS),
+                    "second tick's forming row must carry its accept time (row " + i + ")");
+        }
+
+        // A tick without ingest_ts leaves the probe untouched (null-safe
+        // accumulator contract: the previous accept time, never a fabrication).
+        harness.processElement(trade(T0 + 3_000L, "fp-in-3", 102_00L, 3L), T0 + 3_000L);
+        List<RowData> afterNull = new ArrayList<>();
+        harness.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TICK_TAG)
+                .forEach(r -> afterNull.add(r.getValue()));
+        assertEquals(18, afterNull.size());
+        assertEquals(222_000L, afterNull.get(12).getLong(CandleLiveColumns.INGEST_TS),
+                "missing ingest_ts keeps the previous accept time, never a fabricated one");
+    }
+
+    @Test
+    @DisplayName("platform KPI probe: no ingest_ts ever → sentinel Long.MIN_VALUE, not 0")
+    void formingRowsKeepUnknownProbeSentinel() throws Exception {
+        fn = new MultiTimeframeAggregateFunction(LIVE_INTERVAL, false, true, true);
+        harness = ProcessFunctionTestHarnesses.forKeyedProcessFunction(
+                fn,
+                row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN),
+                Types.LONG);
+        harness.open();
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0);
+
+        harness.processElement(trade(T0 + 1_000L, "fp-no-in", 100_00L, 10L), T0 + 1_000L);
+
+        List<RowData> fast = new ArrayList<>();
+        harness.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TICK_TAG)
+                .forEach(r -> fast.add(r.getValue()));
+        assertEquals(6, fast.size());
+        for (RowData row : fast) {
+            assertEquals(Long.MIN_VALUE, row.getLong(CandleLiveColumns.INGEST_TS),
+                    "unknown probe must stay the sentinel, never 0");
+        }
+    }
+
+    @Test
     @DisplayName("W3-d: live mirrors are scan-driven — no emission without a record, all due slots emit from one record")
     void liveMirrorsAreScanDriven() throws Exception {
         open();

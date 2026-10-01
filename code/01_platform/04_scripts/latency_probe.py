@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Snapshot the signal job's latency histograms from Flink REST (stdout and/or TSV).
 
-Two KPIs share one histogram shape but measure different legs:
+Three KPIs share one histogram shape but measure different legs:
 
 * ``ingest_to_monitor`` - ms-exact pipeline latency: ``now - raw.ingest_ts`` at the
   step-2 identity monitor (ingestion accept -> Fluss write -> Flink read -> dedup).
@@ -10,6 +10,9 @@ Two KPIs share one histogram shape but measure different legs:
   the bridge maps epoch seconds to ms, so the value carries a uniform 0-1000 ms
   quantization on top of the pipeline; use the fake (ms-timestamp) feed as the
   comparable baseline, never this number alone as pipeline latency.
+* ``ingest_to_strategy`` - platform speed at the strategy host: ``now - raw.ingest_ts``
+  (ingestion accept -> strategy in-memory read, the canonical FIFTEEN_S forming row).
+  Feed-independent by construction; this is the "how fast are we" number.
 
 Each histogram is per-subtask with a short sliding window (4096 samples), so query
 ONE subtask per request: a single ``get=`` list with too many ids trips Flink's
@@ -34,6 +37,8 @@ METRICS = (
     ("ingest_to_monitor", "ingest-latency-monitor",
      lambda name: "ingest-latency-monitor" in name),
     ("tick_to_strategy", "strategy-host",
+     lambda name: name.startswith("strategy-host ->")),
+    ("ingest_to_strategy", "strategy-host",
      lambda name: name.startswith("strategy-host ->")),
 )
 

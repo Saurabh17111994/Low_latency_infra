@@ -1,6 +1,7 @@
 package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 
@@ -16,12 +17,18 @@ import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 /**
- * Phase 0 multi-TF aggregator contract: {@link CandleLiveColumns} must mirror
- * the first 15 columns of {@code code/01_platform/02_sql/ddl/35_candle_features.sql}
- * (DDL order, types, nullability, PK instrument_token/tf/window_start) — the
- * merged table's candle prefix. Wave C W-C5a retired DDL 32/33 with their
- * tables, so the pin moved to the surviving DDL — same pattern as
- * {@link CandleClosedColumnsAgreementTest}.
+ * Phase 0 multi-TF aggregator contract: the first
+ * {@link CandleLiveColumns#DDL_FIELD_COUNT} columns of {@link CandleLiveColumns}
+ * must mirror the candle prefix of
+ * {@code code/01_platform/02_sql/ddl/35_candle_features.sql} (DDL order, types,
+ * nullability, PK instrument_token/tf/window_start) — the merged table's candle
+ * prefix. Wave C W-C5a retired DDL 32/33 with their tables, so the pin moved to
+ * the surviving DDL — same pattern as {@link CandleClosedColumnsAgreementTest}.
+ *
+ * <p>The trailing {@link CandleLiveColumns#INGEST_TS} probe is deliberately NOT
+ * part of the DDL prefix: it is an in-memory observability column on the live
+ * stream only (never persisted), and the last test below proves the DDL does not
+ * declare it.
  */
 class CandleLiveColumnsAgreementTest {
 
@@ -53,16 +60,16 @@ class CandleLiveColumnsAgreementTest {
     @Test
     void ddlDeclares15ColumnsInPinnedOrder() throws IOException {
         List<Column> cols = parseColumns();
-        assertTrue(cols.size() >= CandleLiveColumns.FIELD_COUNT,
+        assertTrue(cols.size() >= CandleLiveColumns.DDL_FIELD_COUNT,
                 "merged DDL carries the candle contract plus features + sealed");
-        assertEquals(CandleLiveColumns.COLUMN_NAMES,
-                cols.subList(0, CandleLiveColumns.FIELD_COUNT).stream().map(Column::name).toList());
+        assertEquals(CandleLiveColumns.COLUMN_NAMES.subList(0, CandleLiveColumns.DDL_FIELD_COUNT),
+                cols.subList(0, CandleLiveColumns.DDL_FIELD_COUNT).stream().map(Column::name).toList());
     }
 
     @Test
     void ddlTypesMatchTypeRootsPerColumn() throws IOException {
         List<Column> cols = parseColumns();
-        for (int i = 0; i < CandleLiveColumns.FIELD_COUNT; i++) {
+        for (int i = 0; i < CandleLiveColumns.DDL_FIELD_COUNT; i++) {
             assertEquals(CandleLiveColumns.TYPE_ROOTS.get(i), cols.get(i).type(),
                     "column " + i + " (" + cols.get(i).name() + ") type root");
         }
@@ -71,11 +78,26 @@ class CandleLiveColumnsAgreementTest {
     @Test
     void ddlNullabilityMatchesPerColumn() throws IOException {
         List<Column> cols = parseColumns();
-        for (int i = 0; i < CandleLiveColumns.FIELD_COUNT; i++) {
+        for (int i = 0; i < CandleLiveColumns.DDL_FIELD_COUNT; i++) {
             assertEquals(CandleLiveColumns.COLUMN_NULLABLE_IN_DDL.get(i),
                     cols.get(i).nullableInDdl(),
                     "column " + i + " (" + cols.get(i).name() + ") nullability");
         }
+    }
+
+    @Test
+    void trailingIngestProbeIsPinnedAndAbsentFromTheDdl() throws IOException {
+        // The probe is the first column AFTER the DDL prefix, BIGINT, NOT NULL.
+        assertEquals(CandleLiveColumns.DDL_FIELD_COUNT, CandleLiveColumns.INGEST_TS,
+                "the ingest probe must sit immediately after the pinned prefix");
+        assertEquals("ingest_ts", CandleLiveColumns.COLUMN_NAMES.get(CandleLiveColumns.INGEST_TS));
+        assertEquals("BIGINT", CandleLiveColumns.TYPE_ROOTS.get(CandleLiveColumns.INGEST_TS));
+        assertEquals(Boolean.FALSE,
+                CandleLiveColumns.COLUMN_NULLABLE_IN_DDL.get(CandleLiveColumns.INGEST_TS));
+        // …and the merged DDL does NOT declare it: index 15 there is a feature.
+        List<Column> cols = parseColumns();
+        assertNotEquals("ingest_ts", cols.get(CandleLiveColumns.DDL_FIELD_COUNT).name(),
+                "ingest_ts must never leak into the stored merged-table schema");
     }
 
     @Test

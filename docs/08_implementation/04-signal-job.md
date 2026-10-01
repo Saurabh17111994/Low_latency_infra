@@ -451,21 +451,23 @@ Actual chaining is performance-tested; logical boundaries remain explicit for me
 
 Deployment SHALL reject unbounded or too-short `DEDUP_TTL`, missing production checkpoint storage, unbounded checkpoint restart retry, and any deviation from pinned values.
 
-### Latency KPIs — which number means what (F5, 2026-09-28)
+### Latency KPIs — which number means what (F5, 2026-09-28; third KPI 2026-10-01)
 
-Two histograms share one shape (`DescriptiveStatisticsHistogram`, 4096-sample sliding window, per
+Three histograms share one shape (`DescriptiveStatisticsHistogram`, 4096-sample sliding window, per
 subtask; quantiles median/p75/p90/p95/p99/p999) but measure different legs:
 
 | Metric | Where | What it is | Use |
 |---|---|---|---|
 | `compute.latency.ingest_to_monitor` | step-2 identity monitor on the deduped tick stream | `now - raw.ingest_ts` (ms), exact, every tick: ingestion accept → Fluss write → Flink read → dedup | **The real-feed pipeline KPI.** On the token feed this is the ms-resolution number to quote against an SLO. Measured at session close 2026-09-28 (8 subtasks): median 24 ms, p95 43-44 ms, p99 62-74 ms |
 | `compute.latency.tick_to_strategy` | strategy host | tick event-time → host read | End-to-end tick age. On the token feed the bridge maps epoch **seconds** to ms, so the value carries a uniform 0-1,000 ms quantization on top of the pipeline (measured 15:00: median 496, p95 942, p99 1,012 ms). Do not read it as pipeline latency; the fake (ms-timestamp) feed is the comparable baseline (`logs/stage-profile-*`) |
+| `compute.latency.ingest_to_strategy` (2026-10-01) | strategy host | `now - raw.ingest_ts` (ms), exact, canonical `FIFTEEN_S` forming row once per tick: ingestion accept → Fluss write → Flink read → dedup → multi-TF aggregation → host read | **The platform-speed KPI.** Feed-independent by construction (starts at our accept clock, not the broker's whole-second label); skips an unset/clock-skewed probe. Expect p50 in the tens of ms on both fake and real feeds; its p99 is the tail to optimize, while `tick_to_strategy` stays the business "signal age" |
 
 The ms-exact monitor skips a missing/negative `ingest_ts` and never forwards (fails safe). Its
 window is short, so capture within a minute of the state you care about. Standard capture:
 `python3 code/01_platform/04_scripts/latency_probe.py --label <label> --out <tsv>` — it queries
 one subtask per request because a single `get=` list with too many ids trips Flink's ~4 KB header
-limit. Evidence: `logs/day/monday-20260928/latency-monitor-close.txt`, `logs/chg-357/`.
+limit, and prints all three KPIs. Evidence: `logs/day/monday-20260928/latency-monitor-close.txt`,
+`logs/chg-357/`.
 
 ### Feature layer — shared registry + strategy view (DEC-056/DEC-057, slices S1–S2)
 

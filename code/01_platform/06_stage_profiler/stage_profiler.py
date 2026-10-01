@@ -1402,7 +1402,7 @@ def build_report(phase: Path) -> tuple[list[ProfileRow], str, dict[str, int]]:
                 summary_from_quantiles(
                     tracks[worst_task], n=int(track_counts.get(worst_task, 0))
                 ),
-                source=f"slowest operator: {worst_task} (tracker, latest snapshot)",
+                source=f"slowest operator: {worst_task} (Flink marker source->operator, latest snapshot)",
             )
         )
     else:
@@ -1441,7 +1441,7 @@ def build_report(phase: Path) -> tuple[list[ProfileRow], str, dict[str, int]]:
                 summary_from_quantiles(
                     sinks[worst_sink], n=int(track_counts.get(worst_sink, 0))
                 ),
-                source=f"sink tracker: {worst_sink} (event time -> feature row)",
+                source=f"sink tracker: {worst_sink} (Flink marker source -> operator, processing time)",
             )
         )
     else:

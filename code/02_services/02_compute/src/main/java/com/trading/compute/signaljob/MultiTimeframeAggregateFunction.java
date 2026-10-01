@@ -306,6 +306,11 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         row.setField(CandleLiveColumns.LAST_EVENT_FINGERPRINT,
                 acc.lastFingerprint == null ? null : StringData.fromString(acc.lastFingerprint));
         row.setField(CandleLiveColumns.SCHEMA_VERSION, StringData.fromString(CandleLiveColumns.SCHEMA_VERSION_V1));
+        // Platform-speed KPI probe (2026-10-01): the accept wall-clock of the
+        // close-setting tick rides the forming row to the strategy host, which
+        // reports compute.latency.ingest_to_strategy. Sentinel Long.MIN_VALUE
+        // means unknown — never fabricated, never persisted.
+        row.setField(CandleLiveColumns.INGEST_TS, acc.lastIngestTs);
         return row;
     }
 

@@ -74,7 +74,7 @@ class RunningJobTests(unittest.TestCase):
 
 
 class VertexTests(unittest.TestCase):
-    def test_vertex_selectors_match_the_two_kpis(self):
+    def test_vertex_selectors_match_the_three_kpis(self):
         job = {"vertices": [MONITOR_VERTEX, HOST_VERTEX]}
         for _, _, selector in probe.METRICS:
             self.assertIn(probe.vertex_id(job, selector), ("vm", "vs"))
@@ -104,7 +104,7 @@ class RowsAndSummaryTests(unittest.TestCase):
 
 
 class MainFlowTests(unittest.TestCase):
-    def test_main_prints_both_metrics_and_writes_the_tsv(self):
+    def test_main_prints_all_metrics_and_writes_the_tsv(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             out = pathlib.Path(tmp) / "latency.tsv"
@@ -117,9 +117,11 @@ class MainFlowTests(unittest.TestCase):
             self.assertEqual(0, rc)
             self.assertIn("latency ingest_to_monitor subtasks=2", text)
             self.assertIn("latency tick_to_strategy subtasks=2", text)
+            self.assertIn("latency ingest_to_strategy subtasks=2", text)
             tsv = out.read_text()
             self.assertIn("metric=ingest_to_monitor", tsv)
             self.assertIn("metric=tick_to_strategy", tsv)
+            self.assertIn("metric=ingest_to_strategy", tsv)
             self.assertIn("# label=test job=j1", tsv)
 
     def test_main_exit_3_on_an_empty_window(self):

@@ -69,9 +69,9 @@ FEED=real INGESTION_CONTAINERS=1 \
 | S4 | Java -> Fluss append ack | `stage.fluss_submit_latency`, `stage.fluss_ack_latency`, `append.latency.ms` | append count delta |
 | S5 | ingestion end-to-end (event time -> ack) | `stage.end_to_end_latency` | append count delta |
 | S6 | raw table -> Flink post-dedup | `compute.latency.ingest_to_monitor` summary quantiles | raw source records delta |
-| S7 | Flink per-operator | tracker latency percentiles per operator | `numRecordsIn/Out` delta |
+| S7 | Flink per-operator | Flink latency-marker percentiles per operator (source -> operator, processing time) | `numRecordsIn/Out` delta |
 | S8 | Flink -> feature tables (window close -> readable) | first-seen minus window end on candle polls | sink records delta + feature row counts |
-| S9 | whole path (event time -> feature row) | last-operator tracker latency | raw rows/s vs feature rows/s |
+| S9 | whole path (Flink source -> feature sink) | last-operator Flink marker latency (source -> operator, processing time) | raw rows/s vs feature rows/s |
 
 Honesty rules (non-negotiable): Java histograms carry p50/p90/p99 — no p95;
 values are reported **per container**, never pooled; a metric that is absent is
