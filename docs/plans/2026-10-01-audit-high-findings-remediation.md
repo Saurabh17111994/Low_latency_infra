@@ -62,8 +62,10 @@ keys removed; cwd-relative evidence defaults fixed (clean-break/disaster/stage-c
    the worktree and branch `p6-independent-waves` were removed; 3.8 GB freed.
 3. **Stale `gitbutler/*` branches — done 2026-10-01:** `gitbutler/target`, `gitbutler/workspace`
    deleted (local-only; nothing matching on origin).
-4. **Optional, not done:** republication of the 8 built images to GHCR (would change digests and
-   require a `runtime.lock` re-pin) — needs its own decision.
+4. **Image republication to GHCR — deferred by the operator 2026-10-01:** the 8 built images are
+   deliberately not republished; the warehouse still holds the 2026-09-23 versions. Revisit when
+   a deployment from GHCR is planned (it would change digests, require a `runtime.lock` re-pin,
+   and a re-gate).
 
 ## Verification
 
