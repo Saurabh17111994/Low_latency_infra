@@ -147,6 +147,26 @@ class VmGoldenRecipeTests(unittest.TestCase):
         self.assertIn("secrets.env", text)
         self.assertIn("15:45", text)
 
+    def test_guide_closes_the_published_ports_behind_the_provider_firewall(self):
+        """H9: the daily VM is on a public network and the compose base publishes
+        nine host ports on all interfaces, but the guide had no firewall step —
+        the 4-VM guide mandates one. The CloudPe security group and the SSH
+        tunnel are what keep the ports private.
+        """
+        text = DOC.read_text()
+        self.assertRegex(text, r"(?i)security group",
+                         "VM creation must require a CloudPe security group")
+        self.assertIn("22/tcp", text,
+                      "the group must allow SSH from the operator's IP only")
+        self.assertIn("ssh -L", text,
+                      "the UIs are reached through an SSH tunnel, never opened")
+        self.assertIn("all interfaces", text,
+                      "the guide must say the stack publishes on all interfaces")
+        for port in ("8081", "9249", "9250", "4317", "4318",
+                     "5080", "5081", "9000", "9001"):
+            self.assertIn(port, text,
+                          f"the firewall note must name published host port {port}")
+
 
 if __name__ == "__main__":
     unittest.main()

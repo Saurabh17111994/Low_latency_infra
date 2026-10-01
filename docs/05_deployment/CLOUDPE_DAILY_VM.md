@@ -31,7 +31,10 @@ The disk only ever holds one day of Fluss/Flink state; the lake data lives in R2
 
 ### 2.1 Create the build VM
 CloudPe dashboard → Compute → create VM (Ubuntu, recommended flavor, 100 GB,
-public network, your SSH key).
+public network, your SSH key) **with a CloudPe security group that allows only
+SSH (`22/tcp`) from your IP and denies everything else** — a new group denies
+all inbound by default; CloudPe's default group allows everything. Use the same
+group for the daily VM (§3 step 1).
 
 ### 2.2 Put the repo on it (one of)
 - **from the dev PC** (no push needed; the complete route — it also carries the
@@ -130,7 +133,7 @@ The image is the artifact. Rebuild it when code or images change (repeat
 
 | Step | Command / action |
 |---|---|
-| 1 | Create a VM **from the image** (dashboard; §5 has the API note) |
+| 1 | Create a VM **from the image** (dashboard; §5 has the API note) with the §2.1 security group attached (inbound only `22/tcp` from your IP). The stack publishes nine host ports on **all interfaces** — `8081`, `9249`, `9250`, `4317`, `4318`, `5080`, `5081`, `9000`, `9001` — so keep them closed at the provider firewall; reach the UIs only through an SSH tunnel, e.g. `ssh -L 5080:127.0.0.1:5080 <user>@<vm>` (OpenObserve) or `ssh -L 8081:127.0.0.1:8081 <user>@<vm>` (Flink) — never open the port to the internet |
 | 2 | Inject secrets (never baked into the image): `scp code/01_platform/01_docker/secrets.env root@<vm>:/opt/trading/streaming_project/code/01_platform/01_docker/secrets.env` |
 | 3 | Start: `cd /opt/trading/streaming_project && make day ARGS="start"` — fresh start (`ALLOW_FRESH=1` from `.env.vm`), ready in ~2–4 min (87 s measured software path) |
 | 4 | Provision observability — a fresh OpenObserve starts **empty**: `bash code/01_platform/04_scripts/provision-observability.sh` (destination + dashboards + 47 rules + storage/disk alerts + retention; refuses without `secrets.env` and derives `O2_AUTH_BASIC` from `O2_PASSWORD`). Off-session, a few metric-stream rules are deferred (they need streams the signal job only emits when signals flow) — the disk/ING/INFRA safety rules are already in; re-run when the feed is live. Without this the day runs blind — measured 2026-09-28: zero alerts loaded while the data disk reached 85.13% |
@@ -170,3 +173,4 @@ launch is boring enough to script.
 | `start` refused: "manifest has no instrument rows" | `Arrow_broker/` was never transferred (it lives outside the repo) | §2.2 manifest rsync, then re-run `start` |
 | SignalJob never starts / the launcher FATALs on `/opt/flink-jobs/compute.jar` | `compute.jar` missing — the VM has no JDK to build it | rsync `code/02_services/02_compute/target/compute.jar` from the dev PC (after `mvn package`), re-run `--check`, re-snapshot |
 | Flink lake/tiering or changelog plugin errors | the gitignored Flink/Fluss plugin jars were not transferred | §2.2; `--check` fails on this before a snapshot (CHG-493) |
+| A published port is reachable from the internet | the CloudPe security group is missing/open | close it; reach the UIs only through the SSH tunnel (§3 step 1) |
