@@ -16,11 +16,12 @@ Arrow market-data stream
       ├─ repartition by portfolio_id
 
           → Executor durable gate
+          → go-arrow bridge (arrow-egress; DEC-041)
           → Arrow REST (POST /order/regular)
           → broker
 
 Arrow postback stream
-  → action-capture
+  → go-arrow bridge (action capture runs in the Execution Core — 03_action_capture retired 2026-09-10)
       ├─ Fills LOG
       ├─ Order_Lifecycle KV
       ├─ Positions KV
@@ -28,7 +29,7 @@ Arrow postback stream
       └─ Postback_Quarantine LOG
           → Babysitter Flink job (MVP zero actions)
 
-Safety: Signal/Action Capture/platform/operators → Safety_Halt_Requests → Executor
+Safety: Signal/Execution Core/platform/operators → Safety_Halt_Requests → Executor
 Fluss immutable events → EOD controller → verified Iceberg/S3
 All services → OpenObserve
 ```

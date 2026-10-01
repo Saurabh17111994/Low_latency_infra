@@ -1,7 +1,7 @@
 # Medium findings remediation — audit 2026-09-28 (scope doc)
 
-**Created:** 2026-09-28 · **Status:** proposed — awaiting operator approval and the two `[?]`
-decisions (§9); no code changed by this doc.
+**Created:** 2026-09-28 · **Status:** implemented — roll-up 31/31 done; see the tracker below.
+**(Updated 2026-10-01: this line previously said "awaiting operator approval"; the work has landed.)**
 **Source:** `logs/full-project-audit-20260928/REPORT.md` — every Medium row (the 26 `- M:` bullets,
 the `/v1/intents` money-path note, and the five docs-vs-reality contradictions). 32 report rows →
 **31 distinct items** (the Common `proto control_version` row duplicates the ingestion row and is

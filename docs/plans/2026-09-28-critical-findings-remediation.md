@@ -1,7 +1,8 @@
 # Critical findings remediation — audit 2026-09-28 (C1–C3 scope doc)
 
-**Created:** 2026-09-28 · **Status:** proposed — operator decisions recorded 2026-09-28 (§9);
-awaiting the go-ahead to implement; no code changed by this doc.
+**Created:** 2026-09-28 · **Status:** implemented — operator go-ahead recorded; roll-up 18 done /
+1 live (C3-8 on-VM rehearsal) / 1 skipped by decision (C2-5) of 20; see the tracker below.
+**(Updated 2026-10-01: this line previously said "awaiting the go-ahead"; the work has landed.)**
 **Source:** `logs/full-project-audit-20260928/REPORT.md` — the three Critical rows only.
 **Execution protocol:** `docs/plans/2026-09-24-plan-execution-protocol.md` (verify-first, marker
 discipline, failing-first tests, one CHG per commit, smoke-before-run, tracker hygiene).

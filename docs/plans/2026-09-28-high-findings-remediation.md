@@ -1,7 +1,7 @@
 # High findings remediation — audit 2026-09-28 (scope doc)
 
-**Created:** 2026-09-28 · **Status:** proposed — awaiting operator approval and the two `[?]`
-decisions (§9); no code changed by this doc.
+**Created:** 2026-09-28 · **Status:** implemented — roll-up 22/22 done; see the tracker below.
+**(Updated 2026-10-01: this line previously said "awaiting operator approval"; the work has landed.)**
 **Source:** `logs/full-project-audit-20260928/REPORT.md` — every High row (P0-2…P0-5, P0-7, P0-8,
 P1-2…P1-14) plus the live token-set-hash defect found during the 2026-09-28 diagnosis session.
 **Related:** `docs/plans/2026-09-28-critical-findings-remediation.md` (C1–C3) lands first and

@@ -8,8 +8,8 @@ Arrow market-data WebSocket — live standard token stream (wss://ds.arrow.trade
   → Fluss raw_table_1 LOG
   → Signal Flink job
       ├─ bounded fingerprint deduplication
-      ├─ event-time candle state
-      ├─ forming-bar signal detection
+      ├─ event-time candles: `candle_features` KV, multi-TF (15 s/30 s/1 m/3 m/5 m/15 m), sealed rows only (Updated 2026-10-01: `feature_candles_15s` retired 2026-09-05; CHG-486 closed-only storage)
+      ├─ forming-bar signal detection on the in-memory per-tick forming context (never stored)
       ├─ Signal_Candidates LOG
       ├─ Signal_Candidates_current KV
           → Fluss immutable execution intent

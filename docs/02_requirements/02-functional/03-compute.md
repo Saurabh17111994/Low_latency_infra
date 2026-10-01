@@ -2,13 +2,13 @@
 
 ## Purpose
 
-The Signal Flink job consumes `raw_table_1`, performs bounded best-effort deduplication, assigns event-time semantics, emits final MVP candles, and passes closed-candle plus forming-bar state to Business Logic within the same job. It does not read feature tables back from Fluss for signal generation.
+The Signal Flink job consumes `raw_table_1`, performs bounded best-effort deduplication, assigns event-time semantics, emits final MVP candles — multi-timeframe (15 s / 30 s / 1 m / 3 m / 5 m / 15 m) into `candle_features`, sealed rows only — and passes closed-candle plus in-memory forming-context state to Business Logic within the same job. It does not read feature tables back from Fluss for signal generation. **(Updated 2026-10-01: rewritten from the retired 15 s single-TF `feature_candles_15s` candle output — 2026-09-05 cutover; no forming row is stored (CHG-486).)**
 
 **Tier-scoped deployment (current testing phase):** the current phase builds and validates Compute on the approved 1,024-instrument / single-connection envelope (20,480 ticks/s at 20 Hz per instrument). The 3,000-instrument / 50,000 ticks/s variable baseline remains the deferred production target; `PERF-PROD-60000-001` and the 3,000-instrument acceptance rows (AC-FC-007/011, NFR-PERF-002) are not part of this phase's acceptance. (`PERF-PROD-90000-001` and the 90,000 ticks/s peak are retired, DEC-036; the 60,000 ticks/s gate is current, DEC-045.) Windowing, dedup, and candle logic are envelope-independent — only the load/acceptance profile differs.
 
 ## Constraints
 
-- Compute SHALL NOT read `feature_candles_15s` or any other feature table back from Fluss for signal generation — normal feature computation stays in-process within the Signal job. This prohibition does not cover the explicitly designated Fluss-authoritative state tables (dedup state table, `feature_candles_15s` KV, `Signal_Candidates_current` KV — DEC-038), which SHALL be read/written only for externalized state management, hydration, recovery, and authoritative state access; temporary Flink → Fluss → Flink round trips merely to compute a feature remain prohibited.
+- Compute SHALL NOT read `candle_features` or any other feature table back from Fluss for signal generation — normal feature computation stays in-process within the Signal job. This prohibition does not cover the explicitly designated Fluss-authoritative state tables (dedup state table, `candle_features` KV, `Signal_Candidates_current` KV — DEC-038), which SHALL be read/written only for externalized state management, hydration, recovery, and authoritative state access; temporary Flink → Fluss → Flink round trips merely to compute a feature remain prohibited. **(Updated 2026-10-01: table corrected from the retired `feature_candles_15s` single-TF KV table — 2026-09-05 cutover; Fluss stores sealed candles only since CHG-486.)**
 - Deduplication SHALL NOT use `seq_no` as a required key, ordering field, or completeness assertion. Fingerprint-based dedup is best-effort only.
 - The deployed `DEDUP_TTL_MS` SHALL be exactly `60000` (1 minute). Deployment SHALL reject any other value.
 - `CANDLE_WINDOW_MS` SHALL be exactly `15000` (15 seconds). Deployment SHALL reject any other value.
@@ -38,9 +38,9 @@ Assumptions are validated by the owner and method recorded in the project risks 
 These behaviors are conscious trade-offs accepted by the platform:
 
 - **Best-effort deduplication:** Fingerprint-based dedup may collapse identical legitimate events or miss semantically duplicate packets. The dedup state is bounded by TTL. Metrics distinguish accepted events, dedup hits, and estimated collision risk.
-- **Final-on-emission candles:** A candle is final once the watermark passes `window_end + allowed_lateness`. No provisional candle is emitted. No correction or backfill candle is written for that window in MVP.
+- **Final-on-emission candles:** A candle is final once the watermark passes `window_end + allowed_lateness`. No provisional candle is emitted. No correction or backfill candle is written for that window in MVP. **(Updated 2026-10-01: applies per timeframe to `candle_features` sealed rows (15 s/30 s/1 m/3 m/5 m/15 m); no forming row is stored — the per-tick forming context is in-memory (CHG-486).)**
 - **Late events are discarded:** Events arriving after finalization are counted and measured but do not produce a new or updated row. This limitation remains visible in metrics and documentation.
-- **Empty windows produce no row:** A 15-second window with zero eligible trades emits no candle. Downstream consumers must not assume a row exists for every window.
+- **Empty windows produce no row:** A 15-second window with zero eligible trades emits no candle. Downstream consumers must not assume a row exists for every window. **(Updated 2026-10-01: applies per timeframe — the deployed set is multi-TF 15 s/30 s/1 m/3 m/5 m/15 m in `candle_features`.)**
 - **Deterministic replay is input-bound:** Replay determinism is relative to an identical ordered input snapshot, fingerprint algorithm/version, and configuration version. Different arrival order, fingerprint collisions, missing external state, or changed configuration may produce different results.
 - **Checkpoint restore is compact + rehydrated or safe-degraded (DEC-038):** Flink restores only its small checkpoint (source offsets, watermarks, window/lateness timers, in-flight accumulators, working-cache metadata); large durable Signal business state is verified against and rehydrated from Fluss. If Fluss state is unavailable or incompatible, the job enters a safe degraded state (or fails closed at startup). **(Ranking/reservation restore semantics REMOVED 2026-08-15, CHG-005 — out of scope, not deferred.)**
 
@@ -58,13 +58,13 @@ The following capabilities are explicitly NOT owned by Compute:
 - **Broker order submission, execution, and Arrow REST integration:** Owned by the Executor.
 - **Postback capture, fill lifecycle, and position projection:** Owned by Action Capture.
 - **Babysitter position monitoring and action emission:** Owned by the Babysitter Flink job.
-- **Reading feature tables or strategy tables back from Fluss for computation:** All feature and strategy computation stays in-process within the Signal job. The designated Fluss-authoritative state tables (dedup KV, `feature_candles_15s` KV, `Signal_Candidates_current` KV — DEC-038) are read/written only for externalized state management, hydration, recovery, and authoritative state access — never to compute a feature that could stay in-process.
+- **Reading feature tables or strategy tables back from Fluss for computation:** All feature and strategy computation stays in-process within the Signal job. The designated Fluss-authoritative state tables (dedup KV, `candle_features` KV, `Signal_Candidates_current` KV — DEC-038) are read/written only for externalized state management, hydration, recovery, and authoritative state access — never to compute a feature that could stay in-process. **(Updated 2026-10-01: table corrected from the retired `feature_candles_15s` single-TF KV table — 2026-09-05 cutover; Fluss stores sealed candles only since CHG-486.)**
 
 ## REQ-FC-001: MVP scope
 
-MVP computes 15-second event-time OHLCV candles and the forming-bar state required by Business Logic. Advanced feature columns, market-context features, and current-price Babysitter inputs are deferred until a separate phase with its own schema and tests.
+MVP computes multi-timeframe (15 s / 30 s / 1 m / 3 m / 5 m / 15 m) event-time OHLCV candles into `candle_features` and the in-memory per-tick forming context required by Business Logic; Fluss stores sealed candles only (CHG-486). Advanced feature columns, market-context features, and current-price Babysitter inputs are deferred until a separate phase with its own schema and tests. **(Updated 2026-10-01: rewritten from the retired 15 s single-TF `feature_candles_15s` output — 2026-09-05 cutover; forming state is in-memory, never a stored row.)**
 
-The `feature_candles_15s` table name fixes the deployed MVP granularity at 15 seconds. A different granularity requires a new versioned table and migration; it is not a runtime-only toggle.
+The `candle_features` table name fixes the deployed MVP timeframe set (15 s / 30 s / 1 m / 3 m / 5 m / 15 m). A different timeframe set requires a new versioned table and migration; it is not a runtime-only toggle. **(Updated 2026-10-01: rewritten from the retired `feature_candles_15s` single-TF table — 2026-09-05 cutover.)**
 
 ## REQ-FC-002: Source and event classification
 
@@ -96,7 +96,7 @@ A late event within allowed lateness may affect an in-memory window before emiss
 
 ## REQ-FC-005: Candle aggregation
 
-For each instrument and 15-second event-time window containing at least one eligible accepted row (trades + quotes; volume/tick_count only from `TRADE` rows with `last_qty > 0`):
+For each instrument, timeframe, and event-time window containing at least one eligible accepted row (trades + quotes; volume/tick_count only from `TRADE` rows with `last_qty > 0`): **(Updated 2026-10-01: applies per timeframe — deployed set 15 s/30 s/1 m/3 m/5 m/15 m; the retired single-TF path fixed only 15 s.)**
 
 | Field                       | Rule                                                                                         |
 | --------------------------- | -------------------------------------------------------------------------------------------- |
@@ -121,9 +121,9 @@ The discard metric SHALL include instrument, window, lateness, and reason. A fut
 
 ## REQ-FC-007: Forming-bar state handoff
 
-Within the same Signal Flink job, Compute SHALL expose a typed in-job event to Business Logic whenever an eligible trade updates the current forming bar. The event includes instrument, window boundaries, current OHLCV accumulator, event timestamp, fingerprint, and source metadata.
+Within the same Signal Flink job, Compute SHALL expose a typed in-job event to Business Logic whenever an eligible trade updates the current forming bar. The event includes instrument, window boundaries, current OHLCV accumulator, event timestamp, fingerprint, and source metadata. **(Updated 2026-10-01: the forming context is in-memory per tick and never stored in Fluss — no forming row exists (DEC-059/Wave C, CHG-486); the fast feed carries every timeframe's forming row per accepted tick (CHG-484).)**
 
-Business Logic SHALL consume this state directly. It SHALL NOT wait for `feature_candles_15s`. **(The no-Fluss-round-trip ranking clause is REMOVED 2026-08-15, CHG-005.)**
+Business Logic SHALL consume this state directly. It SHALL NOT wait for `candle_features` (sealed rows; the live/forming context is in-memory). **(The no-Fluss-round-trip ranking clause is REMOVED 2026-08-15, CHG-005.)** **(Updated 2026-10-01: table corrected from the retired `feature_candles_15s` single-TF table — 2026-09-05 cutover; no forming row is stored (CHG-486).)**
 
 ## REQ-FC-008: Checkpoint boundary and state ownership (DEC-038)
 
@@ -143,7 +143,7 @@ Sustained backpressure that threatens the 100 ms decision SLO, checkpoint timeou
 
 ## REQ-FC-011: Finalization and source-partition contract
 
-MVP SHALL use an explicit final-only candle contract. No provisional candle is emitted. A single final candle is emitted when the tested finalization condition is met. The requirement SHALL name separately:
+MVP SHALL use an explicit final-only candle contract. No provisional candle is emitted. A single final candle is emitted when the tested finalization condition is met. **(Updated 2026-10-01: applies per timeframe to `candle_features` sealed rows (15 s/30 s/1 m/3 m/5 m/15 m); no stored forming row exists — the forming context is in-memory (DEC-059/Wave C, CHG-486).)** The requirement SHALL name separately:
 
 - watermark out-of-orderness bound;
 - source-partition idleness threshold;
@@ -162,11 +162,11 @@ The implementation SHALL report accepted event rate, dedup entries, serialized e
 
 ## REQ-FC-013: Typed closed-candle handoff
 
-Compute SHALL expose both typed closed-candle events and forming-bar events to Business Logic within the Signal job. Each event includes instrument, `portfolio_id` or routing scope when applicable, window boundaries, source schema/configuration versions, deterministic ordering metadata, and event/processing timestamps. Business Logic SHALL not reconstruct these events by reading the candle table back.
+Compute SHALL expose both typed closed-candle events and forming-bar events to Business Logic within the Signal job. Each event includes instrument, `portfolio_id` or routing scope when applicable, window boundaries, source schema/configuration versions, deterministic ordering metadata, and event/processing timestamps. Business Logic SHALL not reconstruct these events by reading the candle table back. **(Updated 2026-10-01: closed-candle events are `candle_features` sealed rows across six timeframes; forming events are the in-memory per-tick forming context — no stored forming row exists (DEC-059/Wave C, CHG-486). `portfolio_id` is removed with the ranking scope (2026-08-15, CHG-005).)**
 
 ## REQ-FC-010: Metrics and acceptance
 
-Required metrics include source throughput, dedup hits, dedup state size, invalid events by reason, late events, candle throughput, watermark lag, forming-bar update rate, source/sink latency, checkpoint duration/size, restore count, state corruption/recovery events, source split/idleness state, finalization delay, and state-growth bytes.
+Required metrics include source throughput, dedup hits, dedup state size, invalid events by reason, late events, candle throughput, watermark lag, forming-bar update rate, source/sink latency, checkpoint duration/size, restore count, state corruption/recovery events, source split/idleness state, finalization delay, and state-growth bytes. **(Updated 2026-10-01: candle metrics are per timeframe; forming-bar update rate is the in-memory fast-feed counter `compute.candles.live.tick.emitted` — no stored forming rows (CHG-486).)**
 
 Acceptance tests SHALL prove:
 

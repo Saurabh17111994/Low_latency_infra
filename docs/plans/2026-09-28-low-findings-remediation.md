@@ -1,7 +1,7 @@
 # Low findings remediation — audit 2026-09-28 (scope doc)
 
-**Created:** 2026-09-28 · **Status:** proposed — awaiting operator approval; no code changed by
-this doc.
+**Created:** 2026-09-28 · **Status:** implemented — roll-up 17/17 done; see the tracker below.
+**(Updated 2026-10-01: this line previously said "awaiting operator approval"; the work has landed.)**
 **Source:** `logs/full-project-audit-20260928/REPORT.md` — every Low row (the 17 `- L:` bullets;
 the report header's "~15 Low" was approximate).
 **Related:** Critical `…-critical-findings-remediation.md` (C1–C3), High

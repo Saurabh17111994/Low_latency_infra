@@ -1,7 +1,7 @@
 # Platform-speed KPI: ingestion accept → strategy host read (`compute.latency.ingest_to_strategy`)
 
 **Date:** 2026-10-01
-**Status:** drafted for operator review. Nothing implemented, no code or DDL touched.
+**Status:** implemented — CHG-491 (commit `f3a574e9`, 2026-10-01): the strategy host emits `compute.latency.ingest_to_strategy`; real-broker smoke PASS (evidence `logs/chg-491/smoke-kpi.txt`, `logs/stage-profile-20261001-152327/`). **(Updated 2026-10-01: this line previously said "nothing implemented"; the work landed the same day.)**
 **Approved idea (operator, 2026-10-01):** "start the stopwatch when the data arrives at our
 front door, not at the broker's label" — keep the broker-anchored number as the business age,
 add a second, ingestion-anchored number that shows the platform's true speed.

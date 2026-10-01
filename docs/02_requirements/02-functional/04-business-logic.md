@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Business Logic is a stateful operator inside the Signal Flink job. It consumes Compute's in-job closed-candle and forming-bar events, detects patterns, and creates immutable candidates. It never calls a broker and never mutates lifecycle or position state. **Ranking/Reservations/Decisions (Slice 3) is REMOVED from scope 2026-08-15 (CHG-005, not deferred) — see REQ-SS-005/006/009/010 below.**
+Business Logic is a stateful operator inside the Signal Flink job. It consumes Compute's in-job closed-candle and forming-bar events, detects patterns, and creates immutable candidates. It never calls a broker and never mutates lifecycle or position state. **(Updated 2026-10-01: closed-candle events are multi-timeframe `candle_features` sealed rows (15 s/30 s/1 m/3 m/5 m/15 m); forming events are the in-memory per-tick forming context — no stored forming row exists (DEC-059/Wave C, CHG-486).)** **Ranking/Reservations/Decisions (Slice 3) is REMOVED from scope 2026-08-15 (CHG-005, not deferred) — see REQ-SS-005/006/009/010 below.**
 
-> **MVP scope (Slice 2.1, DEC-034, implemented 2026-08-10):** the implemented subset is closed-candle signal detection → `Signal_Candidates` records per REQ-SS-003 (immutable append). **Scope update 2026-08-15 (CHG-005): Ranking/Reservations/Decisions (Slice 3) is REMOVED — the ranking, reservation, and decision requirements below (REQ-SS-005/006/009/010, REQ-RNK-*) are out of scope, not postponed. Forming-bar detection (REQ-SS-002) is implemented 2026-08-16.**
+> **MVP scope (Slice 2.1, DEC-034, implemented 2026-08-10):** the implemented subset is closed-candle signal detection → `Signal_Candidates` records per REQ-SS-003 (immutable append). **Scope update 2026-08-15 (CHG-005): Ranking/Reservations/Decisions (Slice 3) is REMOVED — the ranking, reservation, and decision requirements below (REQ-SS-005/006/009/010, REQ-RNK-*) are out of scope, not postponed. Forming-bar detection (REQ-SS-002) is implemented 2026-08-16.** **(Updated 2026-10-01: closed-candle detection runs per timeframe on `candle_features` sealed rows (15 s/30 s/1 m/3 m/5 m/15 m); forming-bar detection runs on the in-memory per-tick forming context — the stored `forming_bar` table is RETIRED (2026-09-05) and no forming row is stored (CHG-486).)**
 
 ## Constraints
 
@@ -20,7 +20,7 @@ Business Logic is a stateful operator inside the Signal Flink job. It consumes C
 
 | ID | Assumption | Source |
 | --- | --- | --- |
-| ASM-BL-001 | The Compute operator delivers typed closed-candle and forming-bar events in a deterministic order within each instrument key group after deduplication. | REQ-FC-013, REQ-SS-007 |
+| ASM-BL-001 | The Compute operator delivers typed closed-candle and forming-bar events in a deterministic order within each instrument key group after deduplication. **(Updated 2026-10-01: closed-candle events are `candle_features` sealed rows, multi-TF; forming events are the in-memory per-tick forming context — no stored forming row, CHG-486.)** | REQ-FC-013, REQ-SS-007 |
 | ASM-BL-002 | ~~The in-job portfolio reservation state interface~~ — **REMOVED 2026-08-15 (CHG-005).** | REQ-SS-001, REQ-SS-009 |
 | ASM-BL-003 | Executor respects the supersession contract: a replacement instruction carrying `supersedes_instruction_id` is held or rejected until the predecessor is terminally disposed or explicitly reconciled. | REQ-SS-010 |
 | ASM-BL-004 | Fingerprint collisions at the dedup stage do not cause candidate identity collisions or spurious supersession at the Business Logic layer. | RISK-001 |
@@ -32,7 +32,7 @@ Assumptions are validated by the owner and method recorded in the project risks 
 
 These behaviors are conscious trade-offs accepted by the platform:
 
-- **Forming-bar detection fires on incomplete data:** Patterns may fire on the forming bar before window close. This enables low-latency entry but means a signal may be invalidated later if the bar reverses. The operator defines one-shot, repeatable, or updated detection semantics per strategy.
+- **Forming-bar detection fires on incomplete data:** Patterns may fire on the forming bar before window close. This enables low-latency entry but means a signal may be invalidated later if the bar reverses. The operator defines one-shot, repeatable, or updated detection semantics per strategy. **(Updated 2026-10-01: the forming bar is the in-memory per-tick forming context — no stored forming row exists (DEC-059/Wave C, CHG-486).)**
 - **Immutable instructions are never corrected in-place:** A `Signal_Candidates` LOG record is never updated; the `Signal_Candidates_current` KV row is overwritten in place by supersession. If parameters change, a new candidate and new `instruction_id` are created with a supersession relation. The old candidate remains as audit evidence.
 - ~~**Reservations are conservative:**~~ **REMOVED 2026-08-15 (CHG-005).**
 - **Deterministic replay is bounded:** Replay determinism is guaranteed only under identical ordered input, fingerprint version, strategy version, and configuration version. Different arrival order or missing external state may produce different results. (**Lifecycle/reservation snapshot clause REMOVED 2026-08-15, CHG-005.**)
@@ -57,7 +57,7 @@ The following capabilities are explicitly NOT owned by Business Logic:
 The operator SHALL maintain versioned state for:
 
 - Per-instrument closed-candle ring buffer
-- Current forming-bar accumulator
+- Current forming-bar accumulator **(Updated 2026-10-01: in-memory per tick; never a stored row.)**
 - Active setup descriptors
 - Candidate/evaluation identity
 - ~~Portfolio reservation view received through the tested in-job/materialized state interface~~ **(REMOVED 2026-08-15, CHG-005)**
@@ -66,7 +66,7 @@ State restoration SHALL be checkpointed with the Signal job. (The reservation-st
 
 ## REQ-SS-002: Forming-bar detection
 
-Patterns MAY fire on the forming bar as soon as a verified condition is met. Every candidate includes instrument, strategy, rule, event timestamp, formation state, entry parameters, and the strategy version/configuration hash.
+Patterns MAY fire on the forming bar as soon as a verified condition is met. Every candidate includes instrument, strategy, rule, event timestamp, formation state, entry parameters, and the strategy version/configuration hash. **(Updated 2026-10-01: the forming bar is the in-memory per-tick forming context — no stored `forming_bar` table or forming row exists (RETIRED 2026-09-05; DEC-059/Wave C, CHG-486).)**
 
 The operator SHALL define whether a setup is one-shot, repeatable after invalidation, or updated. A repeated evaluation of the same setup is audit-only unless it creates a new immutable instruction under the instruction lifecycle rules.
 

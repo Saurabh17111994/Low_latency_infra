@@ -14,7 +14,7 @@ The architecture is **blocked for live-money use** until the evidence-gated Arro
 
 ## System purpose
 
-The platform ingests supported NSE and MCX market data, computes multi-timeframe event-time candles (15 s / 30 s / 1 m / 3 m / 5 m / 15 m) and runs strategy signals in the same Signal job, publishes immutable candidates and execution intents through Apache Fluss, and submits approved instructions through a durable Executor calling Arrow's REST API directly. **(Updated 2026-09-27: the 15 s single-timeframe candle/forming-bar path is RETIRED — 2026-09-05 cutover; ranking was removed earlier, CHG-005.)**
+The platform ingests supported NSE and MCX market data, computes multi-timeframe event-time candles (15 s / 30 s / 1 m / 3 m / 5 m / 15 m) and runs strategy signals in the same Signal job, publishes immutable candidates and execution intents through Apache Fluss, and submits approved instructions through a durable Executor; broker order entry goes only through the go-arrow bridge (DEC-041) — the Executor never calls Arrow's REST API directly. **(Updated 2026-09-27: the 15 s single-timeframe candle/forming-bar path is RETIRED — 2026-09-05 cutover; ranking was removed earlier, CHG-005.)**
 
 It independently captures broker postbacks, builds order-lifecycle and fill-derived position state, runs a checkpointed Babysitter no-op in MVP, and offloads eligible immutable history to encrypted Iceberg/S3 storage.
 
