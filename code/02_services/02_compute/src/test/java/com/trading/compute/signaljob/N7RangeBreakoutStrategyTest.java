@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.trading.compute.feature.FeatureView;
+import com.trading.compute.feature.PerInstrumentFeatures;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -70,6 +72,27 @@ class N7RangeBreakoutStrategyTest {
         metrics = new HeapMetrics();
         out = new ListOut();
         strategy = new N7RangeBreakoutStrategy(SignalJobConfig.from(env()), metrics);
+    }
+
+    /** Minimal stable view: market snapshot + empty features + disabled context. */
+    private static StrategyView viewWith(MarketSnapshot market) {
+        PerInstrumentFeatures features = new PerInstrumentFeatures();
+        return new StrategyView() {
+            @Override
+            public MarketView market() {
+                return market;
+            }
+
+            @Override
+            public FeatureView features() {
+                return features;
+            }
+
+            @Override
+            public ContextView context() {
+                return ContextView.disabled();
+            }
+        };
     }
 
     private static RowData closed(Timeframe tf, long ws, long high, long low) {
@@ -460,6 +483,90 @@ class N7RangeBreakoutStrategyTest {
                 closed(Timeframe.FIFTEEN_S, 7 * 15_000L, 10_007L, 10_007L), out);
         assertEquals(7 * 15_000L, strategy.armedForTest(Timeframe.FIFTEEN_S).windowStart);
         assertEquals(2L, strategy.armedCountForTest());
+    }
+
+    // — v2 audit (CHG-504) ————————————————————————————————————————————————
+
+    @Test
+    @DisplayName("v2 audit on a live fire carries the full market snapshot and path=live")
+    void auditCarriesMarketOnLiveFire() throws Exception {
+        open();
+        feedSevenClosedWithStrictN7Last(Timeframe.FIFTEEN_S);
+        MarketSnapshot market = new MarketSnapshot();
+        market.bidPx1 = 10_010L;
+        market.bidQty1 = 100L;
+        market.askPx1 = 10_020L;
+        market.askQty1 = 50L;
+        market.vwapPaise = 10_015L;
+        market.statsChangedAt = 150_000L;
+        market.depthChangedAt = 190_000L;
+
+        strategy.onLiveTick(live(Timeframe.FIFTEEN_S, 10_007L, 200_000L), viewWith(market), out);
+
+        assertEquals(1, out.rows.size());
+        String audit = field(out.rows.get(0), SignalCandidatesTableColumns.SCORE_INPUTS);
+        assertTrue(audit.startsWith("{\"v\":2,"), audit);
+        assertTrue(audit.contains("\"id\":\"n7-range-breakout-v1\""), audit);
+        assertTrue(audit.contains("\"tf\":\"FIFTEEN_S\""), audit);
+        assertTrue(audit.contains("\"side\":\"BUY\""), audit);
+        assertTrue(audit.contains("\"path\":\"live\""), audit);
+        assertTrue(audit.contains("\"triggerPrice\":10007"), audit);
+        assertTrue(audit.contains("\"vwap\":10015"), audit);
+        assertTrue(audit.contains("\"bid\":[{\"px\":10010,\"qty\":100,\"ord\":null},"), audit);
+        assertTrue(audit.contains("\"ask\":[{\"px\":10020,\"qty\":50,\"ord\":null},"), audit);
+        assertTrue(audit.contains("\"spread\":10"), audit);
+        assertTrue(audit.contains("\"statsChangedAt\":150000"), audit);
+        assertTrue(audit.contains("\"depthChangedAt\":190000"), audit);
+        // The triggering forming row is the candle in context (the test row
+        // carries windowStart=0, which the 0 = not-provided convention renders null).
+        assertTrue(audit.contains(
+                "\"candle\":{\"windowStart\":null,\"windowEnd\":15000,\"open\":10007,"), audit);
+    }
+
+    @Test
+    @DisplayName("arm-time fire stamps path=arm and the arming closed candle")
+    void auditOnArmTimeFire() throws Exception {
+        open();
+        long step = Timeframe.FIFTEEN_S.windowMs();
+        int[] ranges = {7, 6, 5, 4, 3, 2};
+        for (int i = 0; i < 6; i++) {
+            long high = 10_000L + i;
+            strategy.onClosedCandle(
+                    closed(Timeframe.FIFTEEN_S, i * step, high, high - ranges[i]), out);
+        }
+        // Breaching trade newer than the future 7th candle's window end; no
+        // setup armed yet, so this fires nothing.
+        strategy.onLiveTick(live(Timeframe.FIFTEEN_S, 10_007L, 500_000L), out);
+        assertEquals(0, out.rows.size());
+
+        MarketSnapshot market = new MarketSnapshot();
+        market.bidPx1 = 10_006L;
+        market.statsChangedAt = 480_000L;
+        market.depthChangedAt = 490_000L;
+        strategy.onClosedCandle(closed(Timeframe.FIFTEEN_S, 6 * step, 10_006L, 10_005L),
+                viewWith(market), out);
+
+        assertEquals(1, out.rows.size());
+        String audit = field(out.rows.get(0), SignalCandidatesTableColumns.SCORE_INPUTS);
+        assertTrue(audit.contains("\"path\":\"arm\""), audit);
+        assertTrue(audit.contains("\"detectionTs\":500000"), audit);
+        assertTrue(audit.contains("\"bid\":[{\"px\":10006,\"qty\":null,\"ord\":null},"), audit);
+        // The arming closed candle is the candle in context.
+        assertTrue(audit.contains(
+                "\"candle\":{\"windowStart\":90000,\"windowEnd\":105000,"), audit);
+    }
+
+    @Test
+    @DisplayName("a fire without a view still emits a v2 audit with a null market block")
+    void auditWithoutViewRendersNullMarket() throws Exception {
+        open();
+        feedSevenClosedWithStrictN7Last(Timeframe.FIFTEEN_S);
+        strategy.onLiveTick(live(Timeframe.FIFTEEN_S, 10_007L, 200_000L), out);
+
+        String audit = field(out.rows.get(0), SignalCandidatesTableColumns.SCORE_INPUTS);
+        assertTrue(audit.startsWith("{\"v\":2,"), audit);
+        assertTrue(audit.contains("\"market\":{\"bid\":[{\"px\":null,"), audit);
+        assertTrue(audit.contains("\"statsChangedAt\":null"), audit);
     }
 
     // — identity ——————————————————————————————————————————————————————————

@@ -76,6 +76,13 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
     /** Last trade price seen (used for the arm-time ordering edge). */
     private long lastEvalPrice = 0L;
 
+    /**
+     * Latest view handed by the host (null on direct legacy calls/tests): the
+     * fire-time audit reads the shared market snapshot from it. Stable per
+     * instrument slot; transient because the host rebuilds slots on restore.
+     */
+    private transient StrategyView currentView;
+
     /** Instrument identity, refreshed from every row. */
     private long token = -1L;
     private String exchange;
@@ -94,6 +101,30 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
     @Override
     public String ruleId() {
         return config.n7RuleId();
+    }
+
+    /**
+     * View-aware live callback (host entry point, 2026-10-02 CHG-504): captures
+     * the shared {@link StrategyView} so the fire-time audit can record the
+     * market snapshot the rule actually read, then runs the same evaluation as
+     * the legacy form.
+     */
+    @Override
+    public void onLiveTick(RowData live, StrategyView view, Collector<RowData> out)
+            throws Exception {
+        currentView = view;
+        onLiveTick(live, out);
+    }
+
+    /**
+     * View-aware closed callback (host entry point): an arm-time fire carries
+     * the same audit as a live fire, so it captures the view too.
+     */
+    @Override
+    public void onClosedCandle(RowData closed, StrategyView view, Collector<RowData> out)
+            throws Exception {
+        currentView = view;
+        onClosedCandle(closed, out);
     }
 
     /**
@@ -116,7 +147,7 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
             return;
         }
         long price = live.getLong(CandleLiveColumns.CLOSE_PAISE);
-        evaluate(price, tradeTime, out);
+        evaluate(price, tradeTime, liveCandle(live), out);
         lastEvalPrice = price;
         lastEvalTime = tradeTime;
         lastEvalFingerprint = fp;
@@ -174,7 +205,8 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
             // when this TF is the highest breached (P2-049: same D-006 rule
             // as the live path, otherwise arm-time double-emits).
             if (lastEvalTime > we && isHighestBreached(tf, lastEvalPrice)) {
-                evaluateArmedSetup(tf, setup, lastEvalPrice, lastEvalTime, out);
+                evaluateArmedSetup(tf, setup, lastEvalPrice, lastEvalTime,
+                        closedCandle(closed), FIRE_PATH_ARM, out);
             }
         }
     }
@@ -200,8 +232,8 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
     }
 
     /** Check every armed setup at one price; emit the highest breached TF only. */
-    private void evaluate(long price, long tradeTime, Collector<RowData> out)
-            throws Exception {
+    private void evaluate(long price, long tradeTime, SignalAuditJson.AuditCandle candle,
+            Collector<RowData> out) throws Exception {
         Timeframe winnerTf = null;
         ArmedSetup winner = null;
         int breachCount = 0;
@@ -229,16 +261,18 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
             // D-006: lower-timeframe simultaneous breaches are suppressed.
             metrics.inc("suppressed", breachCount - 1);
         }
-        evaluateArmedSetup(winnerTf, winner, price, tradeTime, out);
+        evaluateArmedSetup(winnerTf, winner, price, tradeTime, candle, FIRE_PATH_LIVE, out);
     }
 
     /**
      * Fire one setup at one price if it breaches and has not fired. The host
      * dedups on the deterministic candidate id across restores; the latch
-     * stops re-emits within this instance.
+     * stops re-emits within this instance. The audit records the fire path and
+     * the candle in context (triggering forming row, or arming closed candle).
      */
     private void evaluateArmedSetup(Timeframe tf, ArmedSetup setup, long price,
-            long tradeTime, Collector<RowData> out) throws Exception {
+            long tradeTime, SignalAuditJson.AuditCandle candle, String firePath,
+            Collector<RowData> out) throws Exception {
         String side = sideFor(price, setup.highPaise, setup.lowPaise);
         if (side == null || setup.firedSide != null) {
             return;
@@ -251,7 +285,7 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
             return;
         }
         setup.firedSide = side;
-        out.collect(buildRow(tf, setup, side, price, tradeTime));
+        out.collect(buildRow(tf, setup, side, price, tradeTime, candle, firePath));
     }
 
     /** Side implied by price vs the setup levels, or null when inside. */
@@ -340,7 +374,7 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
     }
 
     private GenericRowData buildRow(Timeframe tf, ArmedSetup setup, String side, long price,
-            long tradeTime) {
+            long tradeTime, SignalAuditJson.AuditCandle candle, String firePath) {
         // One instance serves one instrument: token and identity refresh from
         // every row. Tests that feed only closed candles still stamp the row
         // correctly; live rows add exchange/symbol. Same fallbacks as the
@@ -375,7 +409,14 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
         // ExecutionIntentBuilder rejects a present-but-non-positive limit).
         row.setField(SignalCandidatesTableColumns.LIMIT_PRICE_PAISE, null);
         row.setField(SignalCandidatesTableColumns.SCORE_INPUTS,
-                StringData.fromString(scoreInputs(tf, setup, side, price)));
+                StringData.fromString(SignalAuditJson.build(
+                        ruleId, tf.code(), side,
+                        setup.windowStart, setup.windowEnd, setup.highPaise, setup.lowPaise,
+                        price, firePath, tradeTime, evaluationTs,
+                        candle.windowStart(), candle.windowEnd(), candle.openPaise(),
+                        candle.highPaise(), candle.lowPaise(), candle.closePaise(),
+                        candle.volume(),
+                        currentView == null ? null : currentView.market())));
         row.setField(SignalCandidatesTableColumns.FORMATION_SNAPSHOT_REF,
                 StringData.fromString(formationRef(tf, setup, side, price, tradeTime)));
         row.setField(SignalCandidatesTableColumns.VALIDITY_REASON,
@@ -387,16 +428,36 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
         return row;
     }
 
-    private static String scoreInputs(Timeframe tf, ArmedSetup setup, String side, long price) {
-        return "{"
-                + "\"tf\":\"" + tf.code() + "\","
-                + "\"side\":\"" + side + "\","
-                + "\"n7WindowStart\":" + setup.windowStart + ","
-                + "\"levelHigh\":" + setup.highPaise + ","
-                + "\"levelLow\":" + setup.lowPaise + ","
-                + "\"n7Range\":" + (setup.highPaise - setup.lowPaise) + ","
-                + "\"triggerPrice\":" + price
-                + "}";
+    /** Fire paths stamped into the v2 audit. */
+    static final String FIRE_PATH_LIVE = "live";
+    static final String FIRE_PATH_ARM = "arm";
+
+    /** Candle in context at fire time: the triggering live forming row. */
+    private static SignalAuditJson.AuditCandle liveCandle(RowData live) {
+        return new SignalAuditJson.AuditCandle(
+                nullableLong(live, CandleLiveColumns.WINDOW_START),
+                nullableLong(live, CandleLiveColumns.WINDOW_END),
+                nullableLong(live, CandleLiveColumns.OPEN_PAISE),
+                nullableLong(live, CandleLiveColumns.HIGH_PAISE),
+                nullableLong(live, CandleLiveColumns.LOW_PAISE),
+                nullableLong(live, CandleLiveColumns.CLOSE_PAISE),
+                nullableLong(live, CandleLiveColumns.VOLUME));
+    }
+
+    /** Candle in context at fire time: the arming closed candle (arm path). */
+    private static SignalAuditJson.AuditCandle closedCandle(RowData closed) {
+        return new SignalAuditJson.AuditCandle(
+                nullableLong(closed, CandleClosedColumns.WINDOW_START),
+                nullableLong(closed, CandleClosedColumns.WINDOW_END),
+                nullableLong(closed, CandleClosedColumns.OPEN_PAISE),
+                nullableLong(closed, CandleClosedColumns.HIGH_PAISE),
+                nullableLong(closed, CandleClosedColumns.LOW_PAISE),
+                nullableLong(closed, CandleClosedColumns.CLOSE_PAISE),
+                nullableLong(closed, CandleClosedColumns.VOLUME));
+    }
+
+    private static Long nullableLong(RowData row, int idx) {
+        return row == null || row.isNullAt(idx) ? null : row.getLong(idx);
     }
 
     private static String formationRef(Timeframe tf, ArmedSetup setup, String side,
