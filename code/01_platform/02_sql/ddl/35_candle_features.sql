@@ -15,11 +15,13 @@
 -- Columns: candle_closed's 15 columns (same order/types) + features MAP<INT,
 --   DOUBLE> (DEC-057: append-only registry ids, never renumbered or reused) +
 --   sealed BOOLEAN.
--- Writes (DEC-059): the strategy host writes forming-row upserts on the live
---   cadence (1 Hz/key, CHG-462) with sealed=false, and the final sealed write
---   at close with the close-cadence features. Sealed rows are NEVER rewritten
---   (late ticks are dropped — enforced in the writer, not by DDL).
--- Readers: finished rows filter sealed=true; the now-view reads the forming row.
+-- Writes (DEC-059; closed-only storage 2026-10-01): the strategy host writes
+--   exactly one sealed row per closed window with the close-cadence features.
+--   Nothing is written on the live cadence — forming candles and their features
+--   live in Flink memory (the strategy host's in-memory view). Sealed rows are
+--   NEVER rewritten (late ticks are dropped — enforced in the writer, not DDL).
+-- Readers: every stored row is a finished window (sealed=true). The live
+--   now-view is the strategy host's in-memory view, never this table.
 -- Feature add/remove: one registry line + one pin line (RETIRED to remove) —
 --   no DDL change (DEC-057/DEC-059).
 -- Bucketing (P4-243 twin): bucket.key=instrument_token colocates all TFs x all

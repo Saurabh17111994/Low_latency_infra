@@ -8,11 +8,12 @@ import java.util.Map;
  * {@code candle_closed}'s 15 columns + the feature snapshot (DEC-057: a MAP
  * keyed by the append-only registry ids) + {@code sealed}.
  *
- * <p>One writer only (the strategy host): forming rows ({@code sealed = false})
- * on the live cadence, the final sealed row at close with the close-cadence
- * features. A sealed row is terminal — {@link #acceptsUpdate(boolean)} is the
- * single rule the writer consults, so a late tick can never rewrite a sealed
- * window (DDL 35; DEC-059).
+ * <p>One writer only (the strategy host), closed-only storage (2026-10-01):
+ * one sealed row per closed window with the close-cadence features; nothing
+ * is written on the live cadence (forming candles live in Flink memory). A
+ * sealed row is terminal — {@link #acceptsUpdate(boolean)} is the single rule
+ * the writer consults, so a late tick can never rewrite a sealed window
+ * (DDL 35; DEC-059).
  */
 public record MergedCandleRow(
         long instrumentToken,

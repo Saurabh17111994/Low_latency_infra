@@ -68,9 +68,10 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
      * timeframes since 2026-10-01): every accepted trade tick emits each TF's
      * forming row ({@link CandleLiveColumns}), FIFTEEN_S first, so the strategy
      * host reads the evolving candle of every timeframe in memory at tick
-     * latency. Consumed by the strategy host only — the host stores just the
-     * FIFTEEN_S forming row per tick, so this feed does not multiply the Fluss
-     * forming churn. The 1s {@link #LIVE_TAG} snapshot stays the mirror cadence.
+     * latency. Consumed by the strategy host only — the host stores nothing per
+     * tick (closed-only storage, 2026-10-01; one sealed row per window at
+     * close), so this feed does not multiply the Fluss churn. The 1s
+     * {@link #LIVE_TAG} snapshot stays the mirror cadence.
      */
     public static final OutputTag<RowData> LIVE_TICK_TAG = new OutputTag<RowData>("candle-live-tick") {};
 
@@ -674,9 +675,9 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         // strategy requirement, independent of what the table stores. Emission
         // order is Timeframe.values() (FIFTEEN_S first), so single-TF strategies
         // keep evaluating on the canonical tick row. The Fluss mirror keeps the
-        // 1s LIVE_TAG cadence and is not affected; the merged writer stores only
-        // the FIFTEEN_S forming row per tick (StrategyHostFunction) until the
-        // storage cadence is decided.
+        // 1s LIVE_TAG cadence and is not affected; the merged writer stores
+        // nothing per tick — one sealed row per window at close
+        // (StrategyHostFunction, closed-only storage).
         if (emitLiveTick) {
             boolean emitted = false;
             for (Timeframe tf : Timeframe.values()) {

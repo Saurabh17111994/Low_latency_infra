@@ -74,15 +74,17 @@ public final class MergedCandleFeaturesColumns {
     private static final String[] NAMES = COLUMN_NAMES.toArray(new String[0]);
 
     /**
-     * Wave B reader rule (DEC-059): finished windows filter {@code sealed=true};
-     * the now-view reads the forming row ({@code sealed=false}). These tiny
-     * predicates exist so every reader spells the rule the same way.
+     * Wave B reader rule (DEC-059): finished windows filter {@code sealed=true}.
+     * Closed-only storage (2026-10-01): every stored row is sealed, so this is
+     * always true for table rows; the predicate stays so every reader spells
+     * the rule the same way. The live now-view is the strategy host's
+     * in-memory forming view, never this table.
      */
     public static boolean isSealed(RowData row) {
         return row.getBoolean(SEALED);
     }
 
-    /** The now-view predicate: true while the row is still forming. */
+    /** True while a row is still forming — never true for stored rows (closed-only). */
     public static boolean isForming(RowData row) {
         return !isSealed(row);
     }

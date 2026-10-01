@@ -103,9 +103,9 @@ public class StrategyHostFunction
 
     /**
      * Wave B (DEC-059): side output of merged {@code candle_features} rows —
-     * a forming row ({@code sealed=false}) per live cadence and the final
-     * sealed row at close. Wired unconditionally to the merged sink in
-     * {@code SignalJob}; the host is the ONLY candle writer (DEC-059).
+     * the sealed row of each closed window (closed-only storage, 2026-10-01:
+     * the live path writes nothing). Wired unconditionally to the merged sink
+     * in {@code SignalJob}; the host is the ONLY candle writer (DEC-059).
      */
     public static final OutputTag<RowData> MERGED_ROWS =
             new OutputTag<RowData>("merged-candle-rows") {};
@@ -296,8 +296,8 @@ public class StrategyHostFunction
         // Low-latency KPI: age of the tick this in-memory read is based on.
         long evtTime = live.getLong(CandleLiveColumns.LAST_EVENT_TIME);
         // 2026-10-01: all six TF forming rows arrive per tick (fast feed). The
-        // canonical FIFTEEN_S row owns the per-tick KPI, the stored forming row
-        // and the C2 pending snapshot; every row fans out to strategies below.
+        // canonical FIFTEEN_S row owns the per-tick KPI and the C2 pending
+        // snapshot; every row fans out to strategies below.
         boolean canonicalTick = Timeframe.FIFTEEN_S.code()
                 .equals(String.valueOf(live.getString(CandleLiveColumns.TF)));
         if (canonicalTick && liveAge != null && evtTime > 0L) {
@@ -307,13 +307,11 @@ public class StrategyHostFunction
         // fresh value; a failing feature update is counted, never blocks delivery.
         // (Inside, only FIFTEEN_S updates the timeframe-independent tick features.)
         updateFeaturesOnTick(slot, live, evtTime);
-        // Wave B (DEC-059): forming-row upsert on the live cadence — the
-        // canonical tick row only, so feeding all six TF rows per tick does not
-        // multiply the stored forming churn. The other TFs' evolving candles
-        // reach strategies in memory (fan-out below) and Fluss at seal.
-        if (canonicalTick) {
-            emitMergedRow(ctx, slot, live, false);
-        }
+        // Closed-only storage (2026-10-01, DEC-059): the live path writes
+        // NOTHING to Fluss. Forming candles and their features live in Flink
+        // memory (this host + the aggregator) for the strategy fan-out; the
+        // merged table receives exactly one sealed row per window at close
+        // (processElement2).
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: one strategy must not starve the others — isolate,
             // count, and continue to the next strategy.
@@ -345,8 +343,9 @@ public class StrategyHostFunction
         // DEC-056: close features update before the fan-out (same contract as the tick path).
         updateFeaturesOnClose(slot, closed);
         // Wave B (DEC-059): the final sealed write — the terminal row of
-        // this window (late ticks can never rewrite it).
-        emitMergedRow(ctx, slot, closed, true);
+        // this window (late ticks can never rewrite it). The only Fluss write
+        // on the host's path (closed-only storage, 2026-10-01).
+        emitSealedMergedRow(ctx, slot, closed);
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: same isolation on the closed path.
             try {
@@ -755,23 +754,18 @@ public class StrategyHostFunction
     }
 
     /**
-     * DEC-056 stored layer: emit one row per closed window carrying every ready
-     * feature of that timeframe. An empty snapshot emits nothing (the table
-     * never carries a placeholder). A failure here is counted, never delivered
-     * into the strategy fan-out.
+     * Closed-only storage (2026-10-01, DEC-059): one merged
+     * {@code candle_features} row for a closed window — the candle row's 15
+     * columns + every ready feature of that timeframe + the seal flag. The
+     * host is the only writer and this is its only storage call; a failure
+     * here is counted, never delivered into the strategy fan-out.
      */
-    /**
-     * Wave B (DEC-059): one merged candle_features row — the candle row's 15
-     * columns + the feature snapshot for its timeframe + the seal flag. The
-     * host is the only writer; a failure here is counted, never delivered into
-     * the strategy fan-out (same contract as {@link #emitFeatureRow}).
-     */
-    private void emitMergedRow(Context ctx, HostSlot slot, RowData candle, boolean sealed) {
+    private void emitSealedMergedRow(Context ctx, HostSlot slot, RowData candle) {
         try {
             Timeframe tf = Timeframe.fromCode(candle.getString(CandleClosedColumns.TF).toString());
             Map<Integer, Double> snapshot = new HashMap<>();
             slot.features.snapshot(tf, snapshot);
-            GenericRowData row = MergedCandleRows.fromCandleRow(candle, snapshot, sealed);
+            GenericRowData row = MergedCandleRows.fromCandleRow(candle, snapshot, true);
             ctx.output(MERGED_ROWS, row);
             mergedRowsEmitted.inc();
             mergedRowsEmittedHeap++;

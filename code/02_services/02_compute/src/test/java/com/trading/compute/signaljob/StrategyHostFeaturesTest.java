@@ -153,27 +153,14 @@ class StrategyHostFeaturesTest {
     }
 
     @Test
-    void mergedRowsShipFormingAndSealedCandlesWhenEnabled() throws Exception {
-        // Wave B (DEC-059): one writer (this host) — a forming row per live
-        // cadence (sealed=false) and the final sealed row at close, carrying
-        // the same feature snapshot the stored layer would have.
+    void mergedRowsShipSealedCandlesOnly() throws Exception {
+        // Closed-only storage (2026-10-01, DEC-059): the live path writes
+        // NOTHING to Fluss — forming candles and their features live in Flink
+        // memory for the strategy fan-out. The only stored rows are the sealed
+        // rows emitted at window close, carrying the feature snapshot.
         openWithMergedRows(FeatureProbe.RULE_ID);
         harness.processElement1(live(TOKEN, Timeframe.FIFTEEN_S, 0L, 12_345L, 100L, 5), 1_000L);
-
-        List<RowData> forming = mergedRows();
-        assertEquals(1, forming.size(), "one forming row per live cadence");
-        RowData formingRow = forming.get(0);
-        assertEquals(TOKEN, formingRow.getLong(MergedCandleFeaturesColumns.INSTRUMENT_TOKEN));
-        assertEquals(12_345L, formingRow.getLong(MergedCandleFeaturesColumns.CLOSE_PAISE));
-        assertEquals(
-                "1",
-                formingRow.getString(MergedCandleFeaturesColumns.SCHEMA_VERSION).toString());
-        assertFalse(formingRow.getBoolean(MergedCandleFeaturesColumns.SEALED));
-        assertEquals(
-                12_345.0,
-                mapOfMerged(formingRow).get(0),
-                1e-9,
-                "forming row carries the tick feature snapshot");
+        assertEquals(0, mergedRows().size(), "no forming row is written on a live tick");
 
         for (int i = 1; i <= 20; i++) {
             harness.processElement2(
@@ -181,27 +168,39 @@ class StrategyHostFeaturesTest {
                     2_000L + i);
         }
         List<RowData> all = mergedRows();
-        assertEquals(21, all.size(), "forming rows + one sealed row per close");
+        assertEquals(20, all.size(), "one sealed row per close, and nothing else");
+        for (RowData row : all) {
+            assertTrue(
+                    row.getBoolean(MergedCandleFeaturesColumns.SEALED),
+                    "every stored row is sealed (closed-only storage)");
+        }
         RowData sealedRow = all.get(all.size() - 1);
-        assertTrue(sealedRow.getBoolean(MergedCandleFeaturesColumns.SEALED));
+        assertEquals(TOKEN, sealedRow.getLong(MergedCandleFeaturesColumns.INSTRUMENT_TOKEN));
         assertEquals(2_000L, sealedRow.getLong(MergedCandleFeaturesColumns.CLOSE_PAISE));
         assertEquals(MergedCandleFeaturesColumns.FIELD_COUNT, sealedRow.getArity());
+        assertEquals(
+                12_345.0,
+                mapOfMerged(sealedRow).get(0),
+                1e-9,
+                "the sealed row still carries the live tick feature snapshot");
     }
 
     @Test
     void mergedRowsShipByDefault() throws Exception {
         // Wave C W-C5a (DEC-059 end state): the host is the only candle
-        // writer — the merged side output is always wired, no flag.
+        // writer — the merged side output is always wired, no flag. Closed-only
+        // storage (2026-10-01): a tick writes nothing; a close writes one
+        // sealed row.
         open(FeatureProbe.RULE_ID);
         harness.processElement1(live(TOKEN, Timeframe.FIFTEEN_S, 0L, 100L, 10L, 1), 1_000L);
+        assertEquals(0, mergedRows().size(), "no forming row on the live path");
         harness.processElement2(
                 closed(TOKEN, Timeframe.FIFTEEN_S.code(), 15_000L, 100L, 10L, 2), 2_000L);
 
         List<RowData> rows = mergedRows();
-        assertEquals(2, rows.size(), "one forming + one sealed row by default");
-        assertFalse(rows.get(0).getBoolean(MergedCandleFeaturesColumns.SEALED));
-        assertTrue(rows.get(1).getBoolean(MergedCandleFeaturesColumns.SEALED));
-        assertEquals(2, function.mergedRowsEmittedForTest());
+        assertEquals(1, rows.size(), "one sealed row per close, nothing on the tick");
+        assertTrue(rows.get(0).getBoolean(MergedCandleFeaturesColumns.SEALED));
+        assertEquals(1, function.mergedRowsEmittedForTest());
     }
 
     @Test
@@ -264,10 +263,10 @@ class StrategyHostFeaturesTest {
                 1e-9,
                 "every strategy reads the shared tick value (the FIFTEEN_S one)");
         assertEquals(
-                1,
+                0,
                 mergedRows().size(),
-                "only the canonical FIFTEEN_S forming row is stored — the other five "
-                        + "TFs' evolving candles are in-memory strategy views, written at seal");
+                "no candle is stored per tick — every TF's evolving candle is an "
+                        + "in-memory strategy view; rows are written only at seal");
     }
 
     @Test
@@ -277,7 +276,7 @@ class StrategyHostFeaturesTest {
 
         assertEquals(0, function.featureTickUpdatesForTest());
         // 2026-10-01: an unparseable TF is not the canonical tick row, so it is
-        // refused once (the feature update); the forming write is not attempted.
+        // refused once (the feature update); nothing is stored on the live path.
         assertEquals(1, function.featureFailuresForTest());
         assertEquals(1, probe().liveCalls, "strategy delivery must survive a feature failure");
     }

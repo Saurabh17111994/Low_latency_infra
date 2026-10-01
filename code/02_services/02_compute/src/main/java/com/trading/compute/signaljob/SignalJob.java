@@ -36,9 +36,9 @@ import org.slf4j.LoggerFactory;
  * schema/validity gate → state-authoritative fingerprint dedup →
  * multi-timeframe aggregator (per-trade OHLCV forming rings for 15s/30s/1m/
  * 3m/5m/15m) → strategy host (config-driven strategies; N7 range-breakout
- * first) — the host is the ONLY candle writer, upserting the merged
- * {@code candle_features} KV table (forming + sealed rows, DEC-059) →
- * signal dual-sink
+ * first) — the host is the ONLY candle writer, writing the merged
+ * {@code candle_features} KV table one sealed row per closed window
+ * (closed-only storage, DEC-059) → signal dual-sink
  * (DEC-035): {@code Signal_Candidates} (Fluss LOG append, every signal) and
  * {@code Signal_Candidates_current} (Fluss KV upsert behind the
  * canonical-signal filter). Business Logic operator internals (candidate
@@ -347,8 +347,8 @@ public final class SignalJob {
                 strategySignals = hostOutput;
 
                 // Wave C W-C5a (DEC-059 end state): the merged candle+feature
-                // table is THE candle table — ONE writer (the host): forming
-                // upserts on the live cadence + sealed rows at close.
+                // table is THE candle table — ONE writer (the host): one sealed
+                // row per closed window (closed-only storage, 2026-10-01).
                 hostOutput
                         .getSideOutput(StrategyHostFunction.MERGED_ROWS)
                         .sinkTo(FlussSink.<RowData>builder()

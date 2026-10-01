@@ -268,7 +268,7 @@ implementation.
 | 10 | Old tables read-only, dropped after N days. |
 | 11 | **Resolved (later round): one lake table** (candles + features together) — native tiering, no split step. (The earlier answer, separate lake tables, was overridden.) |
 | 12 | Merged retention **3 d + lake**. |
-| 20 | Merged forming rows serve the now-view. |
+| 20 | Merged forming rows serve the now-view. **Superseded 2026-10-01 (CHG-486): closed-only storage — the live now-view is the strategy host's in-memory view, never the table.** |
 | 48 | One TF-keyed table (not six). |
 | 49 | sma/rsi null until computable. |
 
@@ -284,13 +284,13 @@ implementation.
 | 18 | Quiet-instrument rows may expire (fallback semantics). |
 | 19 | Rows-vs-churn split confirmed first (census fix + 900 s). |
 | 21 | Stored live leg is freshness-bound, not 75 ms-class. |
-| 22 | Live cadence **1 Hz/key** (halves churn; stored now-view floor ≈1 s). |
+| 22 | Live cadence **1 Hz/key** (halves churn; stored now-view floor ≈1 s). **Superseded for storage 2026-10-01 (CHG-486): no live-cadence write.** |
 | 23 | Per-tick, if ever enabled: **smallest TF only** (load answer below). |
 | 24 | Single global cadence. |
 | 25 | One record per key per emission (no batching) — request-rate watch item. |
-| 26 | All TFs keep live rows. |
+| 26 | All TFs keep live rows. **Superseded for storage 2026-10-01 (CHG-486): no stored live rows — all six TFs are live in Flink memory only.** |
 | 27 | **Revised (later round): keep today's watermark close** — prompt close not adopted (no two-phase flags, no grace). |
-| 50 | **Resolved: strategies act on the in-memory per-tick forming context** (~26 ms p50 path); stored forming rows (1 Hz) serve UI/dashboards/external readers. |
+| 50 | **Resolved: strategies act on the in-memory per-tick forming context** (~26 ms p50 path); stored forming rows (1 Hz) serve UI/dashboards/external readers. **Superseded for storage 2026-10-01 (CHG-486): Fluss stores closed candles only — no stored forming rows exist.** |
 
 ### Q23 load answer — per-tick emission
 
@@ -344,7 +344,7 @@ Recommendation stands: **smallest TF only** if per-tick is ever enabled.
 |---|---|
 | Lake (Q11) | **One lake table** (candles + features) — native tiering. |
 | Prompt close (Q27) | **Not adopted** — watermark close stays (measured ~0.9–1.3 s). |
-| Forming rows for strategies (Q50) | **In-memory per-tick context**; stored 1 Hz rows for UI/external readers. |
+| Forming rows for strategies (Q50) | **In-memory per-tick context only** — closed-only storage (CHG-486, 2026-10-01): no stored forming rows; the table holds sealed candles. |
 | kv.ttl (Q14) | Fallback-only value; moot after the merge. |
 | Per-tick scope (Q23) | **Smallest TF only**, if ever enabled. |
 | Feature add/remove (Q1) | MAP + append-only registry path explained (one registry line + one pin line; `RETIRED` to remove) — **awaiting operator confirmation**. |
@@ -377,6 +377,8 @@ Per-TF forming churn (cumulative records over the main): FIFTEEN_S 4 534 364
 (97.2 %), THIRTY_S 72 990, ONE_M 36 495, THREE_M 12 165, FIVE_M 7 299,
 FIFTEEN_M 2 433 — i.e. the merged writer emits FIFTEEN_S forming rows per tick
 (~300 k versions/min equivalent) and every other TF **once per window at seal**.
+(Pre-CHG-486 measurement; the closed-only storage resolution below removes the
+per-tick forming share.)
 
 **Finding (a) — log-tail p99 ~8.7 s on the smallest TFs.** The KV first-sighting
 leg (S8) shows sealed rows readable in ~1.2 s p99, so the log-tail spikes are a
@@ -390,11 +392,13 @@ at ~1 Hz/key; post-cutover the strategy host (the only writer) consumed only
 the smallest TF per tick and the aggregator's all-TF `LIVE_TAG` snapshot stream
 had no consumer. **Strategy half resolved 2026-10-01 (CHG-484):** the fast feed
 now carries every TF's forming row per tick — strategies see all six evolving
-candles in memory; only the FIFTEEN_S forming row is stored per tick. The
-**storage half remains open** (owner = operator): (a) store all-TF forming
-rows at the 1 Hz/key snapshot cadence (~876 k vs ~300 k forming-versions/min
-measured), (b) keep smallest-TF-only stored forming rows (state-leanest), or
-(c) a tuned per-TF storage cadence.
+candles in memory. **Storage half resolved 2026-10-01 (operator decision,
+CHG-486): closed-only storage** — no forming rows are written at all; the table
+holds one sealed row per closed window, and the live now-view is the strategy
+host's in-memory view. Smoke evidence
+(`logs/chg486-smoke-20261001-111805`, 120 s, presence PASS): FIFTEEN_S writes
++8,658 rows/min vs +301,888/min in the CHG-484 smoke (~35x); zero unsealed rows
+observed; live-path metrics unchanged.
 
 Note: the p99 ≤ 75 ms per-window SLO is **not** met by any stored leg by
 construction (watermark close, Q27 — measured close→read ≈0.7–1.2 s); the

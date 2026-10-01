@@ -17,8 +17,10 @@
 > - Candle table: `candle_features` (DDL `35_candle_features.sql`, DEC-059) —
 >   one KV row per `(instrument_token, tf, window_start)` with the full candle
 >   contract, `features MAP<INT,DOUBLE>` (DEC-057 registry ids) and `sealed`;
->   the strategy host is the single writer: it upserts a forming row at the
->   live cadence and the terminal sealed row when the window closes.
+>   the strategy host is the single writer: one terminal sealed row per closed
+>   window (closed-only storage since CHG-486, 2026-10-01 — the live cadence
+>   writes nothing; forming candles and their features live only in Flink
+>   memory).
 >   `feature_candles_15s` does not exist. **Wave C W-C5a (2026-09-30) retired
 >   `candle_live`/`candle_closed` (DDLs 32/33) and `feature_values` (DDL 34):
 >   the merged sink (`candle-features-sink-v1`) is unconditional, the old
@@ -445,7 +447,7 @@ Actual chaining is performance-tested; logical boundaries remain explicit for me
 
 | `FLUSS_SCANNER_FETCH_*`, `BUFFER_TIMEOUT_MS` (new, 2026-09-26) | **S5→S6 latency tuning (CHG-315):** the raw-source Fluss scanner fetch chunk and the Flink output-buffer flush timeout are env-tunable with latency-tuned defaults — `FLUSS_SCANNER_FETCH_MAX_BYTES` (default 512 KiB; Fluss default 16 MiB), `FLUSS_SCANNER_FETCH_MAX_BYTES_FOR_BUCKET` (default 128 KiB; Fluss default 1 MiB), `FLUSS_SCANNER_FETCH_WAIT_MAX_TIME_MS` (default 20; Fluss default 500), `BUFFER_TIMEOUT_MS` (default 10; Flink default 100). `max-bytes-for-bucket > max-bytes` fails closed. Measured on the full 2 433-instrument universe @ 20 Hz: S6 p50 316→27 ms, p95 543→43 ms, p99 599→55 ms, post-dedup throughput 48.4k→48.8k rows/s, source `pendingRecords` standing backlog 1 673→0; the residual ~1.1 s p99 sink tail is checkpoint-dominated (60 s interval, p50 680 ms end-to-end), a separate lever. Evidence `logs/stage-profile-20260926-015722/`; plan `docs/plans/2026-09-26-signal-source-latency-tuning.md`. |
 
-| `MULTITF_FAST_LIVE_FEED` (new, 2026-09-26) | **Low-latency in-memory signal feed (CHG-316):** with the strategy host enabled, the multi-TF aggregator emits each timeframe's forming row on every accepted trade tick (FIFTEEN_S first; the other five TFs added 2026-10-01, CHG-484) to the fast side output `candle-live-tick` (the host stores only the 15 s forming row, so the stream does not multiply Fluss writes) and the host reads that stream in memory instead of waiting for the 1 s `LIVE_TAG` snapshot; the mirror cadence is unchanged. Default `true`; `false` restores the snapshot feed (kill switch). New histogram `compute.latency.tick_to_strategy` (tick event-time → host read; same shape as `compute.latency.ingest_to_monitor`) and counter `compute.candles.live.tick.emitted`. Measured @ 2 Hz, 200 s: p50 564→49 ms, p95 1 592→80 ms, p99 2 288→93 ms (runs `logs/stage-profile-20260926-034308` snapshot vs `...033605` fast, after the CHG-317 bridge age-flush fix). |
+| `MULTITF_FAST_LIVE_FEED` (new, 2026-09-26) | **Low-latency in-memory signal feed (CHG-316):** with the strategy host enabled, the multi-TF aggregator emits each timeframe's forming row on every accepted trade tick (FIFTEEN_S first; the other five TFs added 2026-10-01, CHG-484) to the fast side output `candle-live-tick` (the host stores nothing on the live path — closed-only storage, CHG-486 — so the stream does not multiply Fluss writes) and the host reads that stream in memory instead of waiting for the 1 s `LIVE_TAG` snapshot; the mirror cadence is unchanged. Default `true`; `false` restores the snapshot feed (kill switch). New histogram `compute.latency.tick_to_strategy` (tick event-time → host read; same shape as `compute.latency.ingest_to_monitor`) and counter `compute.candles.live.tick.emitted`. Measured @ 2 Hz, 200 s: p50 564→49 ms, p95 1 592→80 ms, p99 2 288→93 ms (runs `logs/stage-profile-20260926-034308` snapshot vs `...033605` fast, after the CHG-317 bridge age-flush fix). |
 
 Deployment SHALL reject unbounded or too-short `DEDUP_TTL`, missing production checkpoint storage, unbounded checkpoint restart retry, and any deviation from pinned values.
 
@@ -525,7 +527,7 @@ window_start, window_end
 algorithm/config version
 ```
 
-Active candle state SHALL NOT contain a list, collection, array, or map of individual ticks. Window state (accumulator + `emitted` flag) is deleted by Flink's window cleanup when the watermark passes `window_end + allowed_lateness`; the merged `candle_features` row is upserted while forming and the terminal `sealed=true` row is written when the window closes, after which it is never corrected (Wave C W-C5a, DEC-059).
+Active candle state SHALL NOT contain a list, collection, array, or map of individual ticks. Window state (accumulator + `emitted` flag) is deleted by Flink's window cleanup when the watermark passes `window_end + allowed_lateness`; the terminal `sealed=true` merged `candle_features` row is written when the window closes, after which it is never corrected (Wave C W-C5a, DEC-059; closed-only storage since CHG-486 — there is no live-cadence upsert).
 
 Order key is `(event_time, deterministic_fingerprint_order)`. Price and quantity validation occurs before aggregation. Overflow/invalid numeric behavior is explicit and tested.
 
