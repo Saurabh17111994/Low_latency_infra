@@ -404,6 +404,20 @@ mod tests {
         let path = dir.join("chronyc");
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A concurrent test's fork can inherit this file's write descriptor for
+        // the instant between create and close, so an exec right here can fail
+        // with ETXTBSY (os error 26) — observed in the monday gate 2026-10-02
+        // 18:47 and 2026-10-03 00:01. One successful exec proves no process
+        // still holds the write fd, so every later exec is safe; retry only
+        // that errno and give the inherited descriptor time to clear.
+        for _ in 0..200 {
+            match std::process::Command::new(&path).arg("tracking").output() {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                _ => break,
+            }
+        }
         path.to_string_lossy().into_owned()
     }
 
