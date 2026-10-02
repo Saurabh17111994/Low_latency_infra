@@ -158,7 +158,15 @@ public record SignalJobConfig(
         long contextCacheBytes,
         int contextMaxInflight,
         long contextFetchTimeoutMs,
-        long contextRetryCooldownMs) implements Serializable {
+        long contextRetryCooldownMs,
+        // 2026-10-02 (CHG-526): live feature precompute — the strategy host
+        // materializes every declared CLOSE feature's live value once per
+        // forming event, before the strategy fan-out, so a strategy read is a
+        // plain heap read and the per-tick cost is independent of how many
+        // strategies read. Default true; FEATURE_LIVE_PRECOMPUTE=false is the
+        // compute-on-read kill switch (same numbers, no slab). No storage
+        // effect: sealed rows keep closed-only values.
+        boolean featureLivePrecompute) implements Serializable {
 
     /**
      * M3-1: the default out-of-orderness tolerance in one place — the config
@@ -306,6 +314,13 @@ public record SignalJobConfig(
                 positiveLong(env, "STRATEGY_CONTEXT_FETCH_TIMEOUT_MS", 100L);
         long contextRetryCooldownMs =
                 positiveLong(env, "STRATEGY_CONTEXT_RETRY_COOLDOWN_MS", 250L);
+        // 2026-10-02 (CHG-526): live feature precompute (default true) — the
+        // strategy host materializes every declared CLOSE feature's live value
+        // once per forming event; FEATURE_LIVE_PRECOMPUTE=false keeps the
+        // compute-on-read path (same numbers, no slab). Inert without the
+        // strategy host: nothing built the slab or read latestLive otherwise.
+        boolean featureLivePrecompute =
+                booleanValue(env, "FEATURE_LIVE_PRECOMPUTE", true);
         // P2-166/167: single-resolve the S3 triple once — endpoint + both
         // secrets from the same read, null unless an s3:// URI is actually
         // in use. One read kills the transient-IO inconsistency window and
@@ -397,7 +412,8 @@ public record SignalJobConfig(
                 contextCacheBytes,
                 contextMaxInflight,
                 contextFetchTimeoutMs,
-                contextRetryCooldownMs);
+                contextRetryCooldownMs,
+                featureLivePrecompute);
     }
 
     /**
@@ -444,6 +460,14 @@ public record SignalJobConfig(
     /** Fast per-tick live feed to the strategy host (default true). */
     public boolean multiTfFastLiveFeed() {
         return multiTfFastLiveFeed;
+    }
+
+    /**
+     * Live CLOSE-feature precompute to the per-instrument slab (default true;
+     * {@code FEATURE_LIVE_PRECOMPUTE=false} is the compute-on-read kill switch).
+     */
+    public boolean featureLivePrecompute() {
+        return featureLivePrecompute;
     }
 
     /** The candle table — merged candle+features (DEC-059; default candle_features). */

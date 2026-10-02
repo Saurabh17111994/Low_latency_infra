@@ -67,7 +67,10 @@ public interface FeatureComputer {
      * Value this feature would have if the timeframe's forming candle closed
      * at its current state (2026-10-01), without mutating any closed-candle
      * state. The default is the latest closed value; features with a
-     * closed-form preview override it. Recomputed per call and never stored.
+     * closed-form preview override it. The host invokes this once per forming
+     * event when live precompute is on (2026-10-02, default) and stores the
+     * result in its per-instrument slab; with the kill switch off it is
+     * invoked on read. Never stored in Fluss.
      */
     default double previewOnForming(
             long openPaise,

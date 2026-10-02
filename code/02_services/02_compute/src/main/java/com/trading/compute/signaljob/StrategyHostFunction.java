@@ -650,7 +650,7 @@ public class StrategyHostFunction
                         + "dropping key {}", slots.size(), SUBTASK_SLOT_CAP, key);
                 return null;
             }
-            slot = new HostSlot(contextView);
+            slot = new HostSlot(contextView, config.featureLivePrecompute());
             for (String id : strategyIds) {
                 slot.strategies.put(
                         id, Strategies.create(id, config, sharedMetrics.get(id)));
@@ -665,7 +665,7 @@ public class StrategyHostFunction
         final Map<String, SignalStrategy> strategies = new LinkedHashMap<>();
 
         /** DEC-056: this instrument's shared feature state — computed once, read by every strategy. */
-        final PerInstrumentFeatures features = new PerInstrumentFeatures();
+        final PerInstrumentFeatures features;
 
         /** Latest market snapshot, decoded from the canonical forming row (2026-10-01). */
         final MarketSnapshot market = new MarketSnapshot();
@@ -673,7 +673,8 @@ public class StrategyHostFunction
         /** The shared bundle handed to every strategy callback (stable per slot). */
         final StrategyView view;
 
-        HostSlot(ContextView context) {
+        HostSlot(ContextView context, boolean precomputeLive) {
+            this.features = new PerInstrumentFeatures(precomputeLive);
             this.view = new SlotView(market, features, context);
         }
     }
@@ -908,8 +909,11 @@ public class StrategyHostFunction
             Timeframe tf = Timeframe.fromCode(live.getString(CandleLiveColumns.TF).toString());
             // 2026-10-01: every forming row (all six TFs per tick on the fast
             // feed, all six of a snapshot on the fallback) updates the live
-            // feature view — FeatureView.latestLive previews a CLOSE feature as
-            // if this candle closed now. Heap only: no storage, no state growth.
+            // feature view. 2026-10-02 (CHG-526): onFormingCandle also
+            // materializes every declared CLOSE feature's live value into the
+            // per-instrument slab (FEATURE_LIVE_PRECOMPUTE, default true), so
+            // the strategy fan-out below only reads. Heap only: no storage,
+            // no state growth.
             slot.features.onFormingCandle(
                     tf,
                     live.getLong(CandleLiveColumns.WINDOW_START),

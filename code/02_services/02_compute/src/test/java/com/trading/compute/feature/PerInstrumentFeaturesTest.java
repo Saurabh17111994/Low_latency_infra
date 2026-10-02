@@ -143,4 +143,112 @@ class PerInstrumentFeaturesTest {
                 Double.isNaN(features.latestLive(1, Timeframe.THIRTY_S)),
                 "a forming 30 s candle cannot invent an undeclared feature");
     }
+
+    /**
+     * CHG-526: every forming event materializes each declared CLOSE feature's
+     * live value once — the slab holds the preview, the read returns it, and a
+     * later forming event overwrites it. Undeclared timeframes get no slab.
+     */
+    @Test
+    void formingEventMaterializesTheLiveSlabForEveryDeclaredCloseFeature() {
+        PerInstrumentFeatures features = new PerInstrumentFeatures();
+        features.onFormingCandle(Timeframe.ONE_M, 1_200_000L, 0L, 0L, 0L, 2_000L, 0L, 0L);
+        assertTrue(
+                Double.isNaN(features.liveValueForTest(1, Timeframe.ONE_M)),
+                "no closed history: the materialized SMA(20) preview is not ready");
+        for (int i = 1; i <= 19; i++) {
+            closeOneMinute(features, i * 100L);
+        }
+        features.onFormingCandle(Timeframe.ONE_M, 1_200_000L, 0L, 0L, 0L, 2_000L, 0L, 0L);
+        assertEquals(1_050.0, features.liveValueForTest(1, Timeframe.ONE_M), 1e-9);
+        assertEquals(100.0, features.liveValueForTest(2, Timeframe.ONE_M), 1e-9);
+        assertEquals(
+                1_050.0,
+                features.latestLive(1, Timeframe.ONE_M),
+                1e-9,
+                "the read returns the materialized value");
+        features.onFormingCandle(Timeframe.ONE_M, 1_200_000L, 0L, 0L, 0L, 3_000L, 0L, 0L);
+        assertEquals(
+                1_100.0,
+                features.liveValueForTest(1, Timeframe.ONE_M),
+                1e-9,
+                "each forming event overwrites the slab");
+        assertTrue(
+                Double.isNaN(features.liveValueForTest(1, Timeframe.THIRTY_S)),
+                "undeclared timeframe: no slab entry, never another timeframe's value");
+        assertTrue(Double.isNaN(features.latestLive(1, Timeframe.THIRTY_S)));
+    }
+
+    /** CHG-526: at the close the live slab is set to the just-closed value. */
+    @Test
+    void liveSlabMatchesTheClosedValueAtClose() {
+        PerInstrumentFeatures features = new PerInstrumentFeatures();
+        for (int i = 1; i <= 19; i++) {
+            closeOneMinute(features, i * 100L);
+        }
+        features.onFormingCandle(Timeframe.ONE_M, 1_200_000L, 0L, 0L, 0L, 2_000L, 0L, 0L);
+        assertEquals(1_050.0, features.liveValueForTest(1, Timeframe.ONE_M), 1e-9);
+        closeOneMinute(features, 2_000L);
+        assertEquals(
+                features.latest(1, Timeframe.ONE_M),
+                features.liveValueForTest(1, Timeframe.ONE_M),
+                1e-9,
+                "closed and live agree once the window closes");
+        assertEquals(1_050.0, features.latestLive(1, Timeframe.ONE_M), 1e-9);
+    }
+
+    /** CHG-526 correctness guard: the storage snapshot never reads the live slab. */
+    @Test
+    void storageSnapshotNeverCarriesLiveValues() {
+        PerInstrumentFeatures features = new PerInstrumentFeatures();
+        for (int i = 1; i <= 20; i++) {
+            closeOneMinute(features, i * 100L);
+        }
+        Map<Integer, Double> before = new HashMap<>();
+        features.snapshot(Timeframe.ONE_M, before);
+        assertEquals(1_050.0, before.get(1).doubleValue(), 1e-9);
+        features.onFormingCandle(Timeframe.ONE_M, 1_200_000L, 0L, 0L, 0L, 9_999L, 0L, 0L);
+        assertEquals(
+                1_544.95,
+                features.latestLive(1, Timeframe.ONE_M),
+                1e-9,
+                "the live value moved with the forming close (21000 - 100 + 9999) / 20");
+        Map<Integer, Double> after = new HashMap<>();
+        features.snapshot(Timeframe.ONE_M, after);
+        assertEquals(before, after, "the sealed row keeps the closed values only");
+    }
+
+    /** CHG-526 kill switch: same numbers computed on read, no slab allocated. */
+    @Test
+    void killSwitchComputesTheSameLiveValueOnReadWithoutASlab() {
+        PerInstrumentFeatures precomputed = new PerInstrumentFeatures();
+        PerInstrumentFeatures onRead = new PerInstrumentFeatures(false);
+        for (int i = 1; i <= 19; i++) {
+            closeOneMinute(precomputed, i * 100L);
+            closeOneMinute(onRead, i * 100L);
+        }
+        precomputed.onFormingCandle(Timeframe.ONE_M, 1_200_000L, 0L, 0L, 0L, 2_000L, 0L, 0L);
+        onRead.onFormingCandle(Timeframe.ONE_M, 1_200_000L, 0L, 0L, 0L, 2_000L, 0L, 0L);
+        assertEquals(
+                precomputed.latestLive(1, Timeframe.ONE_M),
+                onRead.latestLive(1, Timeframe.ONE_M),
+                1e-9,
+                "the kill switch must not change the numbers");
+        assertEquals(
+                precomputed.latestLive(2, Timeframe.ONE_M),
+                onRead.latestLive(2, Timeframe.ONE_M),
+                1e-9);
+        assertTrue(
+                Double.isNaN(onRead.liveValueForTest(1, Timeframe.ONE_M)),
+                "no slab is allocated when precompute is off");
+        precomputed.onClosedCandle(
+                Timeframe.ONE_M, 1_200_000L, 1_259_999L, 0L, 0L, 0L, 2_000L, 0L, 0L);
+        onRead.onClosedCandle(
+                Timeframe.ONE_M, 1_200_000L, 1_259_999L, 0L, 0L, 0L, 2_000L, 0L, 0L);
+        assertEquals(precomputed.latest(1, Timeframe.ONE_M), onRead.latest(1, Timeframe.ONE_M), 1e-9);
+        assertEquals(
+                precomputed.latestLive(1, Timeframe.ONE_M),
+                onRead.latestLive(1, Timeframe.ONE_M),
+                1e-9);
+    }
 }

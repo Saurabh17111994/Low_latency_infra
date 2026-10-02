@@ -33,11 +33,14 @@ public interface FeatureView {
     /**
      * Evolving value of {@code featureId} for {@code tf} (2026-10-01): for a
      * CLOSE feature the value as if the timeframe's forming candle closed at
-     * its current state, recomputed from the forming candle the host fed on the
-     * latest accepted tick; exactly {@link #latest} when no current forming
-     * candle exists or for TICK features (already live). Pure read — never
-     * mutates closed state and never lands in storage: stored rows keep the
-     * closed-candle values.
+     * its current state, from the forming candle the host fed on the latest
+     * accepted tick; exactly {@link #latest} when no current forming candle
+     * exists or for TICK features (already live). With live precompute on
+     * (default, 2026-10-02) the host materializes the value once per forming
+     * event, so this is a plain read shared by every strategy of the
+     * instrument; read it from the live callbacks, which run after the
+     * forming update of the same tick. Pure read — never mutates closed state
+     * and never lands in storage: stored rows keep the closed-candle values.
      */
     default double latestLive(int featureId, Timeframe tf) {
         return latest(featureId, tf);

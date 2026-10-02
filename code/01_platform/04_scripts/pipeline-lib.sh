@@ -1186,6 +1186,7 @@ pipeline_submit_job() {
     -e MULTITF_SIGNAL_CONTEXT_ENABLED="${MULTITF_SIGNAL_CONTEXT_ENABLED:-true}" \
     -e MULTITF_LIVE_SNAPSHOT_INTERVAL_MS="${MULTITF_LIVE_SNAPSHOT_INTERVAL_MS:-1000}" \
     -e MULTITF_FAST_LIVE_FEED="${MULTITF_FAST_LIVE_FEED:-true}" \
+    -e FEATURE_LIVE_PRECOMPUTE="${FEATURE_LIVE_PRECOMPUTE:-true}" \
     -e BUFFER_TIMEOUT_MS="${BUFFER_TIMEOUT_MS:-10}" \
     flink-jobmanager flink run -d "${extra_flags[@]}" \
       -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar 2>&1)" || submit_rc=$?

@@ -42,6 +42,18 @@ class SignalJobConfigTest {
         assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(bogus));
     }
 
+    /** CHG-526: live CLOSE-feature precompute defaults on; false is the kill switch; junk fails closed. */
+    @Test
+    void featureLivePrecomputeDefaultTrueWithKillSwitch() {
+        assertTrue(SignalJobConfig.from(env()).featureLivePrecompute());
+        Map<String, String> off = env();
+        off.put("FEATURE_LIVE_PRECOMPUTE", "false");
+        assertFalse(SignalJobConfig.from(off).featureLivePrecompute());
+        Map<String, String> bogus = env();
+        bogus.put("FEATURE_LIVE_PRECOMPUTE", "yes");
+        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(bogus));
+    }
+
     @Test
     void acceptsPinnedValuesAndDefaultsForTuning() {
         SignalJobConfig cfg = SignalJobConfig.from(env());

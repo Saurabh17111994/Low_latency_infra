@@ -98,6 +98,12 @@ x-flink-common: &flink-common
     # STRATEGY_HOST_ENABLED=true (SignalJobConfig fails closed otherwise);
     # inert when MULTITF_FAST_LIVE_FEED=false.
     STRATEGY_MARKET_TICK_ENABLED: ${STRATEGY_MARKET_TICK_ENABLED:-false}
+    # 2026-10-02 (CHG-526): live CLOSE-feature precompute. Default true — the
+    # host materializes every declared CLOSE feature's live value once per
+    # forming event (shared by every strategy); false is the compute-on-read
+    # kill switch. No storage effect: sealed rows stay closed-only. Read from
+    # the job process environment, so it lives in this shared anchor.
+    FEATURE_LIVE_PRECOMPUTE: ${FEATURE_LIVE_PRECOMPUTE:-true}
     EXECUTION_INTENT_ENABLED: ${EXECUTION_INTENT_ENABLED:-false}
     <<: *execution_identity
     EXECUTION_PRODUCT_TYPE: ${EXECUTION_PRODUCT_TYPE:-CNC}
