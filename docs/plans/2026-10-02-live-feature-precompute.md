@@ -5,8 +5,8 @@
 reports / 0 failures / 0 errors / 21 env-gated skips; mutation check caught by 5 tests;
 `make static-check` 0 failures. Runtime: smoke + clean 900 s A/B with a same-jar ON/OFF
 control — strategy-host tail S7/S9 p99 412.8 → 39.4 ms, ingestion equal-or-better, state
-growth identical; production restored on the new jar) — CHG-526 filed; `make gate`
-certification running.
+growth identical; production restored on the new jar) — CHG-526 filed and certified
+by full gate `monday-gates-20261003-001358` at `087fc321` (19/19 PASS, 0 skipped).
 **Operator decision (2026-10-02):** every registered feature's live value is
 materialized on every incoming tick, irrespective of whether any strategy reads
 it; Fluss storage stays closed-only (one sealed row per closed window).
