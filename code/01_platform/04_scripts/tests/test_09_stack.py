@@ -1637,7 +1637,7 @@ def test_the_scheduler_and_the_controller_agree_on_the_trading_day():
     block = service_block_raw(STACK.read_text(), "eod-scheduler")
     assert '"${EOD_ZONE:-Asia/Kolkata}"' in block
     tool = (ROOT / "code/common/src/main/java/com/trading/common/schema/eod/EodControllerTool.java").read_text()
-    assert 'getOrDefault("EOD_ZONE", "Asia/Kolkata")' in tool,         "the controller and the trigger must not disagree about which day it is"
+    assert 'envOr(env, "EOD_ZONE", "Asia/Kolkata")' in tool,         "the controller and the trigger must not disagree about which day it is"
 
 
 def test_no_interpolation_message_contains_a_hyphen():
