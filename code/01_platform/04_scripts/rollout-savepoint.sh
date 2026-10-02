@@ -63,6 +63,8 @@
 #   COMPOSE_PROJECT         optional (-p) for overlays such as p10
 #   JAR                     host path to the new compute jar
 #   JAR_IN_CONTAINER        default /opt/flink/jobs/compute.jar
+#   ALLOW_STALE_JAR        1 = skip the jar freshness check (deliberate rollback
+#                          to an older artifact; the default fails closed)
 #   VERIFY_DEDUP_STATE      1 (default, degrades to warning) | 0
 #   PROMETHEUS_URL          TM Prometheus, default http://localhost:9250/metrics
 #   HIT_SAMPLE_S            post-restore sampling window, default 30
@@ -305,6 +307,34 @@ sample_dedup() {
 	fi
 }
 
+# CHG-522: the rollout deploys a PREBUILT module jar; nothing rebuilds it, so
+# on 2026-10-02 a 12:03 jar predating the 13:43 CHG-516 commit was restored and
+# every probe (RUNNING, checkpoint, dedup) stayed green — old code ran silently.
+# The jar shades common (312 classes), so the roots cover the compute module
+# src/pom, its common dependency and the parent pom. ALLOW_STALE_JAR=1 is the
+# documented escape hatch for a deliberate rollback to an older artifact.
+JAR_FRESHNESS_ROOTS=(
+	code/02_services/02_compute/src/main
+	code/02_services/02_compute/pom.xml
+	code/common/src/main
+	code/common/pom.xml
+	code/pom.xml
+)
+require_fresh_jar() { # $1 = jar path; fail closed when any source is newer
+	local jar="$1" newest
+	[ -r "$jar" ] || die "jar not readable: $jar (build it first: cd code/02_services/02_compute && mvn -o package -DskipTests)"
+	if [ "${ALLOW_STALE_JAR:-0}" = "1" ]; then
+		warn "ALLOW_STALE_JAR=1 — jar freshness NOT checked for $jar (deliberate rollback?)"
+		return 0
+	fi
+	newest="$(find "${JAR_FRESHNESS_ROOTS[@]/#/$ROOT/}" -type f -newer "$jar" \
+		-printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1)"
+	if [ -n "$newest" ]; then
+		die "compute jar is STALE: $jar predates ${newest#* } — rebuild it first: cd code/02_services/02_compute && mvn -o package -DskipTests (ALLOW_STALE_JAR=1 overrides for a deliberate rollback)"
+	fi
+	log "jar freshness: $jar is newer than the compute/common sources"
+}
+
 # ---- 1. preflight ----------------------------------------------------------
 
 log "== rollout-savepoint: $JOB_NAME ($DEPLOYMENT_ENV) =="
@@ -319,6 +349,10 @@ fi
 if ! command -v jq >/dev/null 2>&1; then
 	die "jq is required (REST answers are JSON)"
 fi
+# CHG-522: refuse a stale prebuilt jar before any cluster interaction. The
+# savepoint below stops the running job, so discovering staleness at deploy
+# time would leave the job stopped (and old code running silently on restore).
+require_fresh_jar "$JAR"
 if ! api_get "/v1/config" >/dev/null 2>&1; then
 	if [ "$DRY_RUN" = "1" ]; then
 		warn "JobManager REST not reachable at $JM_URL — dry run continues with placeholder ids"
@@ -471,7 +505,7 @@ fi
 if [ "$DRY_RUN" = "1" ]; then
 	log "DRY: restore path STATE_RECOVERY_PATH=$SAVEPOINT_PATH"
 else
-	[ -r "$JAR" ] || die "jar not readable: $JAR (build it first, e.g. cd code && mvn -q package -pl 02_services/02_compute)"
+	[ -r "$JAR" ] || die "jar not readable: $JAR (build it first: cd code/02_services/02_compute && mvn -o package -DskipTests)"
 	command -v docker >/dev/null 2>&1 || die "docker CLI is required for the deploy step"
 fi
 
