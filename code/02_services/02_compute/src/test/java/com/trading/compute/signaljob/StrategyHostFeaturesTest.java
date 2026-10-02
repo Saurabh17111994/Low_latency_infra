@@ -204,6 +204,36 @@ class StrategyHostFeaturesTest {
     }
 
     @Test
+    void sealedRowsCarryTheMarketSnapshotAsFeatures() throws Exception {
+        // CHG-512: the canonical row's market section feeds the MARKET
+        // features, so the sealed row of a closing window carries the
+        // book/day stats as of that close — never-seen groups stay out.
+        openWithMergedRows(FeatureProbe.RULE_ID);
+        GenericRowData canonical =
+                (GenericRowData) live(TOKEN, Timeframe.FIFTEEN_S, 0L, 12_345L, 100L, 5);
+        canonical.setField(CandleLiveColumns.MKT_TOTAL_BUY_QTY, 500L);
+        canonical.setField(CandleLiveColumns.MKT_VWAP_PAISE, 12_300L);
+        canonical.setField(CandleLiveColumns.MKT_BID_PX_1, 12_340L);
+        canonical.setField(CandleLiveColumns.MKT_BID_QTY_1, 40L);
+        canonical.setField(CandleLiveColumns.MKT_BID_ORD_1, 3L);
+        canonical.setField(CandleLiveColumns.MKT_STATS_CHANGED_AT, 900L);
+        canonical.setField(CandleLiveColumns.MKT_DEPTH_CHANGED_AT, 901L);
+        harness.processElement1(canonical, 1_000L);
+        harness.processElement2(
+                closed(TOKEN, Timeframe.FIFTEEN_S.code(), 15_000L, 100L, 10L, 2), 2_000L);
+
+        List<RowData> rows = mergedRows();
+        assertEquals(1, rows.size());
+        Map<Integer, Double> features = mapOfMerged(rows.get(0));
+        assertEquals(500.0, features.get(3), 1e-9, "total_buy_qty");
+        assertEquals(12_300.0, features.get(9), 1e-9, "vwap_paise");
+        assertEquals(12_340.0, features.get(15), 1e-9, "bid_px_1");
+        assertEquals(40.0, features.get(20), 1e-9, "bid_qty_1");
+        assertEquals(3.0, features.get(25), 1e-9, "bid_ord_1");
+        assertFalse(features.containsKey(30), "ask_px_1 was never seen — absent, not zero");
+    }
+
+    @Test
     void liveTickUpdatesFeaturesBeforeTheStrategyReadsThem() throws Exception {
         open(FeatureProbe.RULE_ID);
         harness.processElement1(live(TOKEN, Timeframe.FIFTEEN_S, 0L, 12_345L, 100L, 5), 1_000L);

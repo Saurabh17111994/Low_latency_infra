@@ -324,6 +324,8 @@ public class StrategyHostFunction
         if (CandleLiveColumns.TF_MARKET_TICK.equals(tfCode)) {
             if (!decodeMarketSnapshot(slot.market, live)) {
                 countLegacyMarketRow();
+            } else {
+                updateFeaturesOnMarket(slot);
             }
             for (SignalStrategy s : slot.strategies.values()) {
                 try {
@@ -356,6 +358,11 @@ public class StrategyHostFunction
             // non-canonical row never touches the snapshot.
             if (!decodeMarketSnapshot(slot.market, live)) {
                 countLegacyMarketRow();
+            } else {
+                // CHG-512: the decoded snapshot also feeds the MARKET features,
+                // so every sealed row of a closing window carries the latest
+                // book/day stats.
+                updateFeaturesOnMarket(slot);
             }
         }
         if (canonicalTick && liveAge != null && evtTime > 0L) {
@@ -940,6 +947,20 @@ public class StrategyHostFunction
             featureCloseUpdatesHeap++;
         } catch (Exception e) {
             countFeatureFailure("close", e);
+        }
+    }
+
+    /**
+     * DEC-056 feature update from the decoded market snapshot (2026-10-02,
+     * CHG-512): MARKET features hold the latest book/day stats, so the sealed
+     * row of each closing window carries them. A failing update is counted,
+     * never blocks delivery (same isolation as the tick/close updates).
+     */
+    private void updateFeaturesOnMarket(HostSlot slot) {
+        try {
+            slot.features.onMarket(slot.market);
+        } catch (Exception e) {
+            countFeatureFailure("market", e);
         }
     }
 

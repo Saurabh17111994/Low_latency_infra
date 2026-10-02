@@ -1,12 +1,14 @@
 package com.trading.compute.feature;
 
+import com.trading.compute.signaljob.MarketView;
 import com.trading.compute.signaljob.Timeframe;
 import java.util.Arrays;
 import java.util.Map;
 
 /**
  * One instrument's feature state (DEC-056): latest values indexed by feature
- * id, plus one preallocated {@link FeatureComputer} per TICK feature and per
+ * id, plus one preallocated {@link FeatureComputer} per TICK feature, per
+ * MARKET feature (fed from the shared market snapshot, CHG-512) and per
  * (CLOSE feature, timeframe) pair.
  *
  * <p><b>Timeframe separation.</b> A CLOSE feature has one independent value
@@ -30,9 +32,12 @@ import java.util.Map;
 public final class PerInstrumentFeatures implements FeatureView {
 
     private final boolean[] isTick;
+    private final boolean[] isMarket;
     private final double[] tickLatest;
+    private final double[] marketLatest;
     private final double[][] closeLatest;
     private final FeatureComputer[] tickComputers;
+    private final FeatureComputer[] marketComputers;
     private final FeatureComputer[][] closeComputers;
     /** Evolving candle per timeframe (2026-10-01): heap-only, never stored. */
     private final long[] formingWindowStart;
@@ -49,9 +54,12 @@ public final class PerInstrumentFeatures implements FeatureView {
         int size = FeatureRegistry.SIZE;
         int tfCount = Timeframe.values().length;
         this.isTick = new boolean[size];
+        this.isMarket = new boolean[size];
         this.tickLatest = new double[size];
+        this.marketLatest = new double[size];
         this.closeLatest = new double[size][];
         this.tickComputers = new FeatureComputer[size];
+        this.marketComputers = new FeatureComputer[size];
         this.closeComputers = new FeatureComputer[size][];
         this.formingWindowStart = new long[tfCount];
         this.formingOpen = new long[tfCount];
@@ -62,6 +70,7 @@ public final class PerInstrumentFeatures implements FeatureView {
         this.formingTicks = new long[tfCount];
         this.lastClosedWindowStart = new long[tfCount];
         Arrays.fill(tickLatest, Double.NaN);
+        Arrays.fill(marketLatest, Double.NaN);
         Arrays.fill(formingWindowStart, Long.MIN_VALUE);
         Arrays.fill(lastClosedWindowStart, Long.MIN_VALUE);
         for (FeatureDef def : FeatureRegistry.all()) {
@@ -71,6 +80,9 @@ public final class PerInstrumentFeatures implements FeatureView {
             if (def.cadence() == FeatureCadence.TICK) {
                 isTick[def.id()] = true;
                 tickComputers[def.id()] = def.computerFactory().get();
+            } else if (def.cadence() == FeatureCadence.MARKET) {
+                isMarket[def.id()] = true;
+                marketComputers[def.id()] = def.computerFactory().get();
             } else {
                 double[] latestPerTimeframe = new double[tfCount];
                 Arrays.fill(latestPerTimeframe, Double.NaN);
@@ -86,7 +98,8 @@ public final class PerInstrumentFeatures implements FeatureView {
 
     /**
      * Latest value of {@code featureId} for {@code tf}, or NaN when not ready.
-     * TICK features are timeframe-independent — {@code tf} is ignored for them.
+     * TICK and MARKET features are timeframe-independent — {@code tf} is
+     * ignored for them.
      */
     @Override
     public double latest(int featureId, Timeframe tf) {
@@ -94,7 +107,13 @@ public final class PerInstrumentFeatures implements FeatureView {
         if (def.status() != FeatureStatus.ACTIVE) {
             return Double.NaN; // retired features are never computed
         }
-        return isTick[featureId] ? tickLatest[featureId] : closeLatest[featureId][tf.ordinal()];
+        if (isTick[featureId]) {
+            return tickLatest[featureId];
+        }
+        if (isMarket[featureId]) {
+            return marketLatest[featureId];
+        }
+        return closeLatest[featureId][tf.ordinal()];
     }
 
     /** Feed one accepted trade tick to every TICK feature. Allocation-free. */
@@ -104,6 +123,20 @@ public final class PerInstrumentFeatures implements FeatureView {
             FeatureComputer computer = tickComputers[id];
             computer.onTick(eventTimeMs, pricePaise, formingVolume, formingTicks);
             tickLatest[id] = computer.value();
+        }
+    }
+
+    /**
+     * Feed the per-instrument market snapshot to every MARKET feature
+     * (2026-10-02, CHG-512) — called on every accepted tick, before the
+     * strategy fan-out and before a closing window's sealed row is built, so
+     * the stored values are the latest-known book/day stats. Allocation-free.
+     */
+    public void onMarket(MarketView view) {
+        for (int id : FeatureRegistry.MARKET_IDS) {
+            FeatureComputer computer = marketComputers[id];
+            computer.onMarket(view);
+            marketLatest[id] = computer.value();
         }
     }
 
@@ -147,6 +180,9 @@ public final class PerInstrumentFeatures implements FeatureView {
         }
         if (isTick[featureId]) {
             return tickLatest[featureId];
+        }
+        if (isMarket[featureId]) {
+            return marketLatest[featureId];
         }
         int ord = tf.ordinal();
         FeatureComputer computer = closeComputers[featureId][ord];
@@ -198,8 +234,14 @@ public final class PerInstrumentFeatures implements FeatureView {
      */
     public void snapshot(Timeframe tf, Map<Integer, Double> out) {
         for (int id : FeatureRegistry.idsFor(tf)) {
-            double value =
-                    isTick[id] ? tickLatest[id] : closeLatest[id][tf.ordinal()];
+            double value;
+            if (isTick[id]) {
+                value = tickLatest[id];
+            } else if (isMarket[id]) {
+                value = marketLatest[id];
+            } else {
+                value = closeLatest[id][tf.ordinal()];
+            }
             if (!Double.isNaN(value)) {
                 out.put(id, value);
             }

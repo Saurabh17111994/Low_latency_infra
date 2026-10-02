@@ -1,5 +1,6 @@
 package com.trading.compute.feature;
 
+import com.trading.compute.signaljob.MarketView;
 import com.trading.compute.signaljob.Timeframe;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -10,6 +11,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
+import java.util.function.ToLongFunction;
 
 /**
  * The one shared feature registry (DEC-056): a static table where each feature
@@ -21,7 +24,8 @@ import java.util.Set;
  *   <li><b>Add:</b> append a {@code FeatureDef} at the end of {@link #FEATURES}
  *       with the next id ({@code == SIZE}) and status {@code ACTIVE}, and append
  *       its id/name line to the pin ledger
- *       ({@code src/test/resources/feature-registry-pins.tsv}). Nothing else:
+ *       ({@code src/test/resources/feature-registry-pins.tsv}). Market-snapshot
+ *       values use the one-line {@link #marketFeature} builder. Nothing else:
  *       no DDL, no sink, no strategy, no rollout flag changes.</li>
  *   <li><b>Remove:</b> change that line's status to {@code RETIRED}. Do not
  *       delete the line and do not change its id or name.</li>
@@ -68,13 +72,63 @@ public final class FeatureRegistry {
                             FeatureStatus.ACTIVE,
                             FeatureCadence.CLOSE,
                             EnumSet.of(Timeframe.ONE_M, Timeframe.FIVE_M, Timeframe.FIFTEEN_M),
-                            () -> new RsiComputer(14)));
+                            () -> new RsiComputer(14)),
+                    // ── market snapshot (2026-10-02, CHG-512): the 42 values the
+                    // host captures from every accepted tick, in CandleLiveColumns
+                    // transport order (stats first, then the attribute-major depth
+                    // ladder). MARKET cadence, all timeframes — every sealed row
+                    // carries the book/day stats as of its close. ──
+                    marketFeature(3, "total_buy_qty", MarketView::totalBuyQty, MarketView::hasStats),
+                    marketFeature(4, "total_sell_qty", MarketView::totalSellQty, MarketView::hasStats),
+                    marketFeature(5, "day_open_paise", MarketView::dayOpenPaise, MarketView::hasStats),
+                    marketFeature(6, "day_high_paise", MarketView::dayHighPaise, MarketView::hasStats),
+                    marketFeature(7, "day_low_paise", MarketView::dayLowPaise, MarketView::hasStats),
+                    marketFeature(8, "prev_close_paise", MarketView::prevClosePaise, MarketView::hasStats),
+                    marketFeature(9, "vwap_paise", MarketView::vwapPaise, MarketView::hasStats),
+                    marketFeature(10, "open_interest", MarketView::openInterest, MarketView::hasStats),
+                    marketFeature(11, "oi_day_high", MarketView::oiDayHigh, MarketView::hasStats),
+                    marketFeature(12, "oi_day_low", MarketView::oiDayLow, MarketView::hasStats),
+                    marketFeature(13, "lower_limit_paise", MarketView::lowerLimitPaise, MarketView::hasStats),
+                    marketFeature(14, "upper_limit_paise", MarketView::upperLimitPaise, MarketView::hasStats),
+                    marketFeature(15, "bid_px_1", v -> v.bidPxPaise(1), v -> v.bidPxPaise(1) > 0L),
+                    marketFeature(16, "bid_px_2", v -> v.bidPxPaise(2), v -> v.bidPxPaise(2) > 0L),
+                    marketFeature(17, "bid_px_3", v -> v.bidPxPaise(3), v -> v.bidPxPaise(3) > 0L),
+                    marketFeature(18, "bid_px_4", v -> v.bidPxPaise(4), v -> v.bidPxPaise(4) > 0L),
+                    marketFeature(19, "bid_px_5", v -> v.bidPxPaise(5), v -> v.bidPxPaise(5) > 0L),
+                    marketFeature(20, "bid_qty_1", v -> v.bidQty(1), v -> v.bidPxPaise(1) > 0L),
+                    marketFeature(21, "bid_qty_2", v -> v.bidQty(2), v -> v.bidPxPaise(2) > 0L),
+                    marketFeature(22, "bid_qty_3", v -> v.bidQty(3), v -> v.bidPxPaise(3) > 0L),
+                    marketFeature(23, "bid_qty_4", v -> v.bidQty(4), v -> v.bidPxPaise(4) > 0L),
+                    marketFeature(24, "bid_qty_5", v -> v.bidQty(5), v -> v.bidPxPaise(5) > 0L),
+                    marketFeature(25, "bid_ord_1", v -> v.bidOrd(1), v -> v.bidPxPaise(1) > 0L),
+                    marketFeature(26, "bid_ord_2", v -> v.bidOrd(2), v -> v.bidPxPaise(2) > 0L),
+                    marketFeature(27, "bid_ord_3", v -> v.bidOrd(3), v -> v.bidPxPaise(3) > 0L),
+                    marketFeature(28, "bid_ord_4", v -> v.bidOrd(4), v -> v.bidPxPaise(4) > 0L),
+                    marketFeature(29, "bid_ord_5", v -> v.bidOrd(5), v -> v.bidPxPaise(5) > 0L),
+                    marketFeature(30, "ask_px_1", v -> v.askPxPaise(1), v -> v.askPxPaise(1) > 0L),
+                    marketFeature(31, "ask_px_2", v -> v.askPxPaise(2), v -> v.askPxPaise(2) > 0L),
+                    marketFeature(32, "ask_px_3", v -> v.askPxPaise(3), v -> v.askPxPaise(3) > 0L),
+                    marketFeature(33, "ask_px_4", v -> v.askPxPaise(4), v -> v.askPxPaise(4) > 0L),
+                    marketFeature(34, "ask_px_5", v -> v.askPxPaise(5), v -> v.askPxPaise(5) > 0L),
+                    marketFeature(35, "ask_qty_1", v -> v.askQty(1), v -> v.askPxPaise(1) > 0L),
+                    marketFeature(36, "ask_qty_2", v -> v.askQty(2), v -> v.askPxPaise(2) > 0L),
+                    marketFeature(37, "ask_qty_3", v -> v.askQty(3), v -> v.askPxPaise(3) > 0L),
+                    marketFeature(38, "ask_qty_4", v -> v.askQty(4), v -> v.askPxPaise(4) > 0L),
+                    marketFeature(39, "ask_qty_5", v -> v.askQty(5), v -> v.askPxPaise(5) > 0L),
+                    marketFeature(40, "ask_ord_1", v -> v.askOrd(1), v -> v.askPxPaise(1) > 0L),
+                    marketFeature(41, "ask_ord_2", v -> v.askOrd(2), v -> v.askPxPaise(2) > 0L),
+                    marketFeature(42, "ask_ord_3", v -> v.askOrd(3), v -> v.askPxPaise(3) > 0L),
+                    marketFeature(43, "ask_ord_4", v -> v.askOrd(4), v -> v.askPxPaise(4) > 0L),
+                    marketFeature(44, "ask_ord_5", v -> v.askOrd(5), v -> v.askPxPaise(5) > 0L));
 
     /** Number of registered features, retired included (== registry dump size). */
     public static final int SIZE = FEATURES.size();
 
     /** ACTIVE feature ids fed on every tick (one computer per instrument). */
     static final int[] TICK_IDS;
+
+    /** ACTIVE market ids fed from the shared snapshot every tick (CHG-512). */
+    static final int[] MARKET_IDS;
 
     /** ACTIVE feature ids carried by a timeframe's stored row, ascending. */
     private static final int[][] IDS_BY_TF;
@@ -89,6 +143,7 @@ public final class FeatureRegistry {
         validate(FEATURES);
         Routing routing = layout(FEATURES);
         TICK_IDS = routing.tickIds();
+        MARKET_IDS = routing.marketIds();
         IDS_BY_TF = routing.idsByTf();
         CLOSE_IDS_BY_TF = routing.closeIdsByTf();
         BY_ID = new FeatureDef[SIZE];
@@ -101,7 +156,7 @@ public final class FeatureRegistry {
     }
 
     /** Routing tables derived from a definition list (package-visible for guard tests). */
-    record Routing(int[] tickIds, int[][] idsByTf, int[][] closeIdsByTf) {}
+    record Routing(int[] tickIds, int[] marketIds, int[][] idsByTf, int[][] closeIdsByTf) {}
 
     /** Builds the routing tables; RETIRED entries are excluded everywhere. */
     static Routing layout(List<FeatureDef> defs) {
@@ -123,12 +178,32 @@ public final class FeatureRegistry {
             closeIdsByTf[t] = toIntArray(closing);
         }
         List<Integer> tick = new ArrayList<>();
+        List<Integer> market = new ArrayList<>();
         for (FeatureDef def : defs) {
-            if (def.status() == FeatureStatus.ACTIVE && def.cadence() == FeatureCadence.TICK) {
+            if (def.status() != FeatureStatus.ACTIVE) {
+                continue;
+            }
+            if (def.cadence() == FeatureCadence.TICK) {
                 tick.add(def.id());
+            } else if (def.cadence() == FeatureCadence.MARKET) {
+                market.add(def.id());
             }
         }
-        return new Routing(toIntArray(tick), idsByTf, closeIdsByTf);
+        return new Routing(toIntArray(tick), toIntArray(market), idsByTf, closeIdsByTf);
+    }
+
+    /**
+     * One MARKET-cadence registry line (CHG-512): all timeframes, value read
+     * from the shared market snapshot by the given extractor, stored only when
+     * the presence gate says the group/level was observed. Keeps the 42 market
+     * lines one line each, in the DEC-057 append-only form.
+     */
+    private static FeatureDef marketFeature(
+            int id, String name,
+            ToLongFunction<MarketView> extractor, Predicate<MarketView> present) {
+        return new FeatureDef(
+                id, name, FeatureStatus.ACTIVE, FeatureCadence.MARKET, ALL_TFS,
+                () -> new MarketValueComputer(extractor, present));
     }
 
     private FeatureRegistry() {}

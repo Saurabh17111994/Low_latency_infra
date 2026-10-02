@@ -12,5 +12,14 @@ public enum FeatureCadence {
     TICK,
 
     /** Updated on each closed candle of a declared timeframe. */
-    CLOSE
+    CLOSE,
+
+    /**
+     * Updated from the per-instrument market snapshot (book + day stats) on
+     * every accepted tick (2026-10-02, CHG-512). Timeframe-independent like
+     * {@link #TICK}, but fed by {@link FeatureComputer#onMarket} instead of
+     * the trade tick — the stored value is the latest-known market state, so
+     * every declared timeframe's sealed row carries it at its close.
+     */
+    MARKET
 }

@@ -1,5 +1,7 @@
 package com.trading.compute.feature;
 
+import com.trading.compute.signaljob.MarketView;
+
 /**
  * One feature's O(1) rolling state for one (instrument, timeframe) pairing
  * (DEC-056: features are computed once and shared by every strategy).
@@ -47,6 +49,19 @@ public interface FeatureComputer {
             long closePaise,
             long volume,
             long tickCount) {}
+
+    /**
+     * Latest per-instrument market snapshot (2026-10-02, CHG-512) — called on
+     * every accepted tick for {@link FeatureCadence#MARKET} features, before
+     * the strategy fan-out and before any sealed row of a closing window is
+     * built. The view is the shared instance the host updates in place; a
+     * feature reads only the fields it declares. Neither callback may
+     * allocate, block, or throw on the normal path.
+     *
+     * @param view latest-known book + day stats (never null; absent = 0 /
+     *     never seen, as {@link MarketView} documents)
+     */
+    default void onMarket(MarketView view) {}
 
     /**
      * Value this feature would have if the timeframe's forming candle closed
