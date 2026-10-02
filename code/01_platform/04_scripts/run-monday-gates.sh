@@ -32,7 +32,7 @@
 # batch beats one gate cycle per step.
 #
 # Modes (a repair loop does not have to pay for all 19 steps, or for one failure
-# at a time; the certifying run below stays fail-fast and unchanged):
+# at a time; the certifying run below stays fail-fast):
 #   --steps LIST  run only those steps, e.g. `--steps 12-19` or `--steps 9,11`.
 #                 SUBSET mode: SUMMARY ends with SUBSET RESULT, never GATE RESULT,
 #                 so a scoped green can not be quoted as a certificate.
@@ -40,6 +40,12 @@
 #                 recorded and the run resumes at the next step) and report every
 #                 failure as SWEEP RESULT. Non-certifying.
 # The certificate is this script with no arguments: 19/19, fail-fast.
+#
+# Parallel pool (CHG-519): a certifying run overlaps the seven stack-independent
+# steps — python (3), Go (5), E2E binaries (6), gateway (14), Rust (15), pins
+# (17), mock-arrow (19) — with the serial chain, bounded by GATE_PARALLEL_JOBS
+# (default 2) flock slots. GATE_PARALLEL=0 forces serial; GATE_PARALLEL=1 also
+# pools a --steps run (for smoke tests). --sweep never pools.
 #
 
 # Prereqs: Fluss up (docker compose up -d), local ~/.m2 warm, Go 1.24+, JDK 17.
@@ -80,6 +86,20 @@ MOCK_ARROW_DIR="$CODE_DIR/02_services/05_mock_arrow"
 EXECUTOR_DIR="$CODE_DIR/02_services/04_executor"
 INGESTION_DIR="${INGESTION_DIR:-$CODE_DIR/02_services/01_ingestion}"
 OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/logs/soak/monday-gates-$(date +%Y%m%d-%H%M%S)}"
+# A pool child (GATE_POOL_CHILD) is this same script re-executed for one pooled
+# step by a parallel parent (see the parallel step pool below). It writes into
+# the parent's run directory and its own summary fragment; the parent flushes
+# the fragment into SUMMARY.txt when it reaps the child.
+GATE_POOL_CHILD="${GATE_POOL_CHILD:-}"
+GATE_POOL_OUT_DIR="${GATE_POOL_OUT_DIR:-}"
+GATE_POOL_SUMMARY="${GATE_POOL_SUMMARY:-}"
+if [ -n "$GATE_POOL_CHILD" ]; then
+	if [ -z "$GATE_POOL_OUT_DIR" ] || [ -z "$GATE_POOL_SUMMARY" ]; then
+		echo "FATAL: pool child without GATE_POOL_OUT_DIR/GATE_POOL_SUMMARY" >&2
+		exit 2
+	fi
+	OUT_DIR="$GATE_POOL_OUT_DIR"
+fi
 # Written by a failing sweep child, read by the driver (must exist in both).
 SWEEP_FAILED_FILE="$OUT_DIR/sweep-failed.txt"
 # Compose paths: constant for the whole run, so they live here and not inside
@@ -120,7 +140,19 @@ _harness_abort() {
 		} >>"$SUMMARY" 2>/dev/null || true
 	fi
 }
-trap '_harness_abort; rm -f "${_script_list:-}"' EXIT
+# Kill pool children (and, through their process groups, their suites) when
+# this run exits early: an orphaned child would keep testing a tree whose gate
+# already failed and could still be running when the next gate starts.
+_gate_pool_cleanup() {
+	local j pid
+	for j in "${POOL_JOBS[@]:-}"; do
+		[ -n "$j" ] || continue
+		pid="${j#*:}"
+		kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+	done
+	return 0
+}
+trap '_harness_abort; rm -f "${_script_list:-}"; _gate_pool_cleanup' EXIT
 # A kill must say the same thing instead of leaving a truncated SUMMARY behind.
 trap 'exit 143' TERM
 trap 'exit 130' INT
@@ -194,6 +226,9 @@ done
 
 mkdir -p "$OUT_DIR"
 SUMMARY="$OUT_DIR/SUMMARY.txt"
+if [ -n "$GATE_POOL_CHILD" ]; then
+	SUMMARY="$GATE_POOL_SUMMARY"
+fi
 
 # Verification accounting: a step that never ran must not read as a pass. The
 # verdict below prints the count, so "14/14" and "13/14 + 1 skipped" can never be
@@ -233,6 +268,169 @@ if [ -n "$STEP_SELECTION" ]; then
 STEPS_SET="$(printf '%s\n' $STEPS_SET | sort -n -u | tr '\n' ' ' | sed 's/ *$//')"
 fi
 
+
+# ── Parallel step pool (GATE-PARALLEL-BEGIN) ─────────────────────────────────
+# Seven steps are stack-independent and independent of each other: the python
+# suites (3), the Go suite (5), the E2E binaries (6), the gateway suite (14),
+# the Rust suite (15), pin discipline (17) and the mock-arrow suite (19). A
+# certifying run launches them as children of this same script — each writing
+# its own summary fragment — while the serial chain (preflight, compose, stack
+# steps, Java suite/drills, DDL, schema/perf, shutdown, compute/UID, images)
+# proceeds. The gate then costs max(pool, serial) instead of pool + serial
+# (measured 22.5 min serial; CHG-519).
+#
+# Concurrency is bounded by GATE_PARALLEL_JOBS flock slot files the children
+# claim themselves, so the parent never blocks launching them. Fail-fast is
+# kept at serial-step boundaries: the chain reaps finished children between its
+# steps and the first non-zero child exit fails the gate there (worst case, a
+# pooled failure waits for the serial step in flight — step 9, ~8 min).
+# --steps/--sweep runs default to serial (GATE_PARALLEL=auto); GATE_PARALLEL=1
+# exercises the pool on a scoped run, GATE_PARALLEL=0 forces serial everywhere.
+GATE_PARALLEL="${GATE_PARALLEL:-auto}"
+GATE_PARALLEL_JOBS="${GATE_PARALLEL_JOBS:-2}"
+POOL_STEPS=(3 5 6 14 15 17 19)
+POOL_JOBS=()          # "step:pid" for every child not yet reaped
+POOL_LAUNCHED=""      # steps handed to the pool; step_active skips them inline
+POOL_FAILED_STEP=""
+POOL_CHILD_CMD=(bash "$0")
+POOL_SETSID=()
+if command -v setsid >/dev/null 2>&1; then
+	POOL_SETSID=(setsid)
+fi
+POOL_ENABLED=0
+if [ "$GATE_PARALLEL" = "auto" ]; then
+	if [ -z "$STEPS_SET" ] && [ "${SWEEP:-0}" != "1" ]; then
+		POOL_ENABLED=1
+	fi
+elif [ "$GATE_PARALLEL" = "1" ] || [ "$GATE_PARALLEL" = "on" ] || [ "$GATE_PARALLEL" = "true" ]; then
+	POOL_ENABLED=1
+fi
+if [ -n "$GATE_POOL_CHILD" ] || [ -n "${GATE_SWEEP_CHILD:-}" ]; then
+	POOL_ENABLED=0
+fi
+# Pooled children run under concurrent load; step 3's 600 s budget was measured
+# on a quiet tree (CHG-199). Raise only the value the child sees — the literal
+# default stays 600, which test_gate_runner_wave21 pins.
+if [ "$POOL_ENABLED" = 1 ]; then
+	export PY_TIMEOUT_SEC="${PY_TIMEOUT_SEC:-900}"
+fi
+
+pool_flush() { # $1 = step: append its fragment to SUMMARY.txt once
+	local frag="$OUT_DIR/.summary-step$1"
+	[ -f "$frag" ] || return 0
+	cat "$frag" >>"$SUMMARY"
+	rm -f "$frag"
+	return 0
+}
+
+pool_remove() { # $1 = pid
+	local j
+	local -a keep=()
+	for j in "${POOL_JOBS[@]:-}"; do
+		[ -n "$j" ] || continue
+		[ "${j#*:}" = "$1" ] || keep+=("$j")
+	done
+	if [ "${#keep[@]}" -gt 0 ]; then
+		POOL_JOBS=("${keep[@]}")
+	else
+		POOL_JOBS=()
+	fi
+}
+
+pool_finish() { # $1 = step, $2 = exit code
+	pool_flush "$1"
+	if [ "$2" -ne 0 ]; then
+		POOL_FAILED_STEP="${1:-unknown}"
+		return 1
+	fi
+	return 0
+}
+
+pool_reap_pid() { # $1 = pid, $2 = its already-collected exit code
+	local j step=""
+	for j in "${POOL_JOBS[@]:-}"; do
+		[ -n "$j" ] || continue
+		if [ "${j#*:}" = "$1" ]; then step="${j%%:*}"; break; fi
+	done
+	pool_remove "$1"
+	pool_finish "$step" "$2"
+}
+
+pool_check() { # non-blocking: reap every child that already finished
+	local running j pid rc=0
+	running=" $(jobs -rp | tr '\n' ' ') "
+	for j in "${POOL_JOBS[@]:-}"; do
+		[ -n "$j" ] || continue
+		pid="${j#*:}"
+		case "$running" in
+			*" $pid "*) continue ;;
+		esac
+		rc=0
+		wait "$pid" || rc=$?
+		pool_reap_pid "$pid" "$rc" || return 1
+	done
+	return 0
+}
+
+pool_wait_step() { # $1 = step: wait for that child alone (no-op if not launched)
+	local j pid rc=0
+	for j in "${POOL_JOBS[@]:-}"; do
+		[ -n "$j" ] || continue
+		if [ "${j%%:*}" = "$1" ]; then
+			pid="${j#*:}"
+			wait "$pid" || rc=$?
+			pool_reap_pid "$pid" "$rc"
+			return $?
+		fi
+	done
+	return 0
+}
+
+pool_drain() { # wait for every remaining child
+	local j pid rc=0
+	while :; do
+		j=""
+		for j in "${POOL_JOBS[@]:-}"; do
+			[ -n "$j" ] && break
+		done
+		[ -n "$j" ] || break
+		pid="${j#*:}"
+		rc=0
+		wait "$pid" || rc=$?
+		pool_reap_pid "$pid" "$rc" || return 1
+	done
+	return 0
+}
+
+pool_launch() { # $1 = step: start this script as a child for that step
+	local n="$1" log="$OUT_DIR/.pool-step$1.log" frag="$OUT_DIR/.summary-step$1"
+	GATE_POOL_CHILD="$n" GATE_POOL_OUT_DIR="$OUT_DIR" GATE_POOL_SUMMARY="$frag" \
+		"${POOL_SETSID[@]}" "${POOL_CHILD_CMD[@]}" --steps "$n" >"$log" 2>&1 &
+	POOL_JOBS+=("$n:$!")
+	POOL_LAUNCHED="$POOL_LAUNCHED $n"
+}
+
+pool_launch_all() { # launch every selected pooled step; they self-limit via slots
+	local n
+	[ "$POOL_ENABLED" = 1 ] || return 0
+	for n in "${POOL_STEPS[@]}"; do
+		step_active "$n" || continue
+		pool_launch "$n"
+	done
+	return 0
+}
+
+pool_fail_now() { # report the pooled failure and fail this gate
+	CURRENT_STEP="${POOL_FAILED_STEP:-unknown}"
+	echo "FAIL: pooled step ${CURRENT_STEP} — see $OUT_DIR/.pool-step${CURRENT_STEP}.log" | tee -a "$SUMMARY"
+	gate_fail
+}
+
+pool_fail_if_any() { pool_check || pool_fail_now; }
+pool_require_step() { pool_wait_step "$1" || pool_fail_now; pool_check || pool_fail_now; }
+pool_drain_all() { pool_drain || pool_fail_now; }
+# ── Parallel step pool (GATE-PARALLEL-END) ───────────────────────────────────
+
 # step_active <n>: is this step selected for THIS run (--steps, and not before the
 # --sweep resume point)? Also names CURRENT_STEP so gate_fail can record which
 # step aborted, which is how the sweep driver knows where to resume.
@@ -241,6 +439,10 @@ step_active() {
 	[ "$1" -ge "${GATE_SWEEP_FROM:-1}" ] || return 1
 	if [ -n "$STEPS_SET" ]; then
 		case " $STEPS_SET " in *" $1 "*) : ;; *) return 1 ;; esac
+	fi
+	# A pooled step already handed to a child is not run inline a second time.
+	if [ "$POOL_ENABLED" = 1 ] && [ -n "$POOL_LAUNCHED" ]; then
+		case " $POOL_LAUNCHED " in *" $1 "*) return 1 ;; esac
 	fi
 	CURRENT_STEP="$1"
 	return 0
@@ -269,6 +471,11 @@ echo "run-monday-gates: go timeout=${GO_TIMEOUT_SEC}s, java timeout=${JAVA_TIMEO
 
 gate_fail() {
 	GATE_DECIDED=1
+	# A pool child's failure belongs to the parent, which prints the one verdict
+	# for the run: the child exits non-zero and leaves the reporting to it.
+	if [ -n "$GATE_POOL_CHILD" ]; then
+		exit 1
+	fi
 	# A sweep child records its step and exits 3 so the driver can resume after it;
 	# only the driver prints a verdict for a sweep. Everything else fails here.
 	if [ "${SWEEP:-0}" = "1" ] && [ -n "${GATE_SWEEP_CHILD:-}" ]; then
@@ -373,7 +580,7 @@ require_go_suite_evidence() { # $1 = go test log, $2 = module dir, $3 = step lab
 # a SKIP, never a pass, so the verdict line stays honest about what was verified.
 # The sweep driver runs the preflight once for the whole sweep, so a child skips
 # it: a drifting stack must stop the driver, not each step.
-if [ -z "${GATE_SWEEP_CHILD:-}" ]; then
+if [ -z "${GATE_SWEEP_CHILD:-}" ] && [ -z "$GATE_POOL_CHILD" ]; then
 if [ "${SWEEP:-0}" = "1" ]; then
 	MODE="sweep (non-certifying: continues past failures; SWEEP RESULT is the only verdict)"
 elif [ -n "$STEPS_SET" ]; then
@@ -467,6 +674,26 @@ else
 fi
 
 # ── 0. Static checks: bash -n + shellcheck on every script (Phase 8 G4) ─────
+fi
+
+# A pool child claims one of GATE_PARALLEL_JOBS slots for its whole run. The
+# slots are flock files, so the bound holds without a central scheduler and
+# the parent can launch every child immediately. fd 8 stays open until exit.
+if [ -n "$GATE_POOL_CHILD" ]; then
+	POOL_SLOT=""
+	while [ -z "$POOL_SLOT" ]; do
+		POOL_SLOT_N=1
+		while [ "$POOL_SLOT_N" -le "$GATE_PARALLEL_JOBS" ]; do
+			exec 8>"$OUT_DIR/.pool-slot-$POOL_SLOT_N"
+			if flock -n 8; then
+				POOL_SLOT="$POOL_SLOT_N"
+				break
+			fi
+			exec 8>&-
+			POOL_SLOT_N=$((POOL_SLOT_N + 1))
+		done
+		[ -n "$POOL_SLOT" ] || sleep 1
+	done
 fi
 
 # ── Sweep driver: --sweep must discover every failing step, not just the first ─
@@ -648,6 +875,9 @@ fi
 # docs-audit C16 (env-key drift) runs inside the full doc audit step after the
 # Java gate.
 fi
+# Hand the stack-independent steps to the pool; they run while the chain below
+# proceeds. pool_launch_all is a no-op unless POOL_ENABLED=1.
+pool_launch_all || pool_fail_now
 if step_active 3; then
 echo "=== [3/19] Python unit suites (reconcile-compare ING-TCP-002 + gate helpers) ===" | tee -a "$SUMMARY"
 # Stale bytecode is a silent liar: a .pyc records its source's mtime at
@@ -826,6 +1056,7 @@ fi
 # than the last change to the source it packages (2026-08-24 gateway/bridge
 # incident: 08-20 images vs 08-24 source went unnoticed until a readyz probe).
 fi
+pool_fail_if_any
 if step_active 8; then
 echo "=== [8/19] image staleness (the service image this gate runs) ===" | tee -a "$SUMMARY"
 if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ]; then
@@ -851,6 +1082,7 @@ else
 	note_skip 8
 	echo "SKIP: image staleness (no docker/compose) — unverified, not green" | tee -a "$SUMMARY"
 fi
+pool_fail_if_any
 
 # ── 3. Full Java gate with ALL integration flags + the LIVE Fluss drills ──────
 # The module scope below is ingestion (common rides along as a dependency), so the
@@ -888,6 +1120,7 @@ if ! (cd "$PROJECT_ROOT" && timeout -k 60 "$JAVA_TIMEOUT_SEC" env FLUSS_BOOTSTRA
 	gate_fail
 fi
 echo "PASS: live Fluss drills (common + gateway, bootstrap $DRILL_BOOTSTRAP)" | tee -a "$SUMMARY"
+pool_fail_if_any
 
 # ── 3b. Full doc audit (make full-audit: scanners + sweeps + trio) ──────────
 # Runs AFTER the Java gate so Layer 1b's docs-audit C6 (test counts vs surefire
@@ -980,6 +1213,8 @@ echo "PASS: evidence ownership check (container-written records group-writable)"
 
 # ── 4. Schema agreement + perf certification explicit gates (G5) ─────────────
 fi
+# Steps 12/13 run the binaries step 6 built: wait for that pooled child first.
+pool_require_step 6
 if step_active 12; then
 echo "=== [12/19] SchemaAgreementTest + PerfBaselineTest explicit ===" | tee -a "$SUMMARY"
 SCHEMA_PERF_TIMEOUT_SEC="${SCHEMA_PERF_TIMEOUT_SEC:-1200}"
@@ -1023,6 +1258,7 @@ require_tests_run "$SHUTDOWN_LOG" "step 13 (SIGTERM-drain pins)"
 require_class_ran "$SHUTDOWN_LOG" com.trading.ingestion.BridgeShutdownRegressionTest "step 13"
 require_class_ran "$SHUTDOWN_LOG" com.trading.ingestion.BridgeShutdownHookTest "step 13"
 echo "PASS: SIGTERM-drain regression (ING-UNIT-023 in-process + ING-UNIT-024 real hook)" | tee -a "$SUMMARY"
+pool_fail_if_any
 
 # ── 4b. Execution gateway module suite (unit + regression) ─────────────────
 # Step 9's module scope is ingestion (common rides along as a dependency) and the
@@ -1113,6 +1349,7 @@ require_class_clean "$COMPUTE_UID_PIN_LOG" "com.trading.compute.signaljob.Signal
 require_class_clean "$COMPUTE_UID_PIN_LOG" "com.trading.compute.signaljob.TradeDecisionsSinksUidTest" "step 16 (UID pins)"
 echo "PASS: compute UID pins ($(grep -aoE 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' "$COMPUTE_UID_PIN_LOG" | tail -1))" | tee -a "$SUMMARY"
 fi
+pool_fail_if_any
 
 # Step 17 (2026-09-14): the pin discipline the rest of the certificate assumes. `gate-fast` has
 # run it since P3-418, but a release certificate could still be minted over floating tags — a
@@ -1183,6 +1420,16 @@ fi
 require_tests_run "$MOCK_ARROW_LOG" "step 19 (mock-arrow suite)"
 echo "PASS: mock-arrow suite ($(grep -aoE 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' "$MOCK_ARROW_LOG" | tail -1))" | tee -a "$SUMMARY"
 fi
+
+# A pool child stops here: its one selected step is done, and the parent owns
+# the summary fragment, the verdict and the memo.
+if [ -n "$GATE_POOL_CHILD" ]; then
+	exit 0
+fi
+
+# Every pooled child is done (or already reported). Flush their fragments before
+# the banner count so the certificate carries all 19 step records.
+pool_drain_all
 
 # A --sweep child stops here: a verdict from a partial run must never be quoted.
 if [ -n "${GATE_SWEEP_CHILD:-}" ]; then
