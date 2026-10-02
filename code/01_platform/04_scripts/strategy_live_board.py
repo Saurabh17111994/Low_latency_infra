@@ -3,8 +3,11 @@
 
 Read-only board from the Flink REST API (no cluster mutation, no job change):
 the SignalJob's state, the two live-path operators' throughput/busy/backpressure,
-the live-path counters, and the two platform latency KPIs (tick->strategy and
-ingest->strategy), each as p50/p95/p99 of the worst subtask.
+the live-path counters (real registry identifiers only — the parity gate rejects
+invented names), and the platform latency histograms, each as p50/p95/p99 of the
+worst subtask. Gated metrics that are absent are printed AND recorded
+(metric-availability.tsv, stage-capture format) so a flag-off topology cannot
+look like a silent zero.
 
 Row VALUES are heap-only by design (DEC-059 closed-only storage: the live path
 writes nothing to Fluss), so no external reader can see them. For row content:
@@ -24,6 +27,7 @@ Flink REST endpoint.
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 import time
 import urllib.parse
@@ -41,27 +45,45 @@ ABS_METRICS = ("numRecordsIn", "numRecordsOut")
 # Time metrics are per-subtask rates; the worst subtask is the honest number.
 TIME_METRICS = ("busyTimeMsPerSecond", "backPressuredTimeMsPerSecond")
 
-# Custom live-path counters (registered in MultiTimeframeAggregateFunction /
-# StrategyHostFunction); a missing one prints "-".
+# Custom live-path counters, exactly as the job graph registers them (the
+# registry is pinned by tests/test_compute_identifier_parity.py: an invented
+# name fails the gate). The flag column is the rollout flag that registers the
+# metric — when such a metric is absent it is printed AND recorded (never a
+# silent zero). A missing unconditional one prints "-".
 LIVE_COUNTERS = (
-    "compute.candles.live.tick.emitted",
-    "compute.market.tick.emitted",
-    "compute.features.updates.tick",
-    "compute.features.updates.close",
-    "compute.features.failed",
-    "compute.market.row.legacy",
-    "compute.merged.rows.emitted",
-    "compute.dedup.duplicates",
-    "compute.session.filtered.pre_open",
-    "compute.session.filtered.post_close",
+    ("compute.candles.live.emitted", "MULTITF_ENABLED"),
+    ("compute.candles.emitted", "MULTITF_ENABLED"),
+    ("compute.candles.late.dropped", "MULTITF_ENABLED"),
+    ("compute.candles.gap.detected", "MULTITF_ENABLED"),
+    ("compute.candles.restored_timer_noop", "MULTITF_ENABLED"),
+    ("compute.session.filtered.pre_open", "MULTITF_ENABLED"),
+    ("compute.session.filtered.post_close", "MULTITF_ENABLED"),
+    ("compute.dedup.first", None),
+    ("compute.dedup.duplicates", None),
+    ("compute.invalid.rows", None),
+    ("compute.signal.kv.filtered.noncanonical", None),
+    ("compute.strategy.suppressed", "STRATEGY_HOST_ENABLED"),
+    ("compute.strategy.failed", "STRATEGY_HOST_ENABLED"),
+    ("compute.strategy.dropped.unkeyed", "STRATEGY_HOST_ENABLED"),
+    ("compute.strategy.dropped.oversize", "STRATEGY_HOST_ENABLED"),
+    ("compute.execution_intent.rejected", "EXECUTION_INTENT_ENABLED"),
 )
 
-# Latency histograms; Flink exposes quantiles as <name>_p50 / _p95 / _p99.
+# Latency histograms (Flink exposes quantiles as <name>_p50 / _p95 / _p99).
+# ingest_to_monitor is unconditional; the two intent KPIs exist only when
+# EXECUTION_INTENT_ENABLED is on.
 LATENCY_METRICS = (
-    "compute.latency.tick_to_strategy",
-    "compute.latency.ingest_to_strategy",
+    ("compute.latency.ingest_to_monitor", None),
+    ("compute.latency.tick_to_intent", "EXECUTION_INTENT_ENABLED"),
+    ("compute.latency.signal_to_intent", "EXECUTION_INTENT_ENABLED"),
 )
 LATENCY_SUFFIXES = ("_p50", "_p95", "_p99")
+
+GATED_FLAGS = {name: flag for name, flag in LIVE_COUNTERS + LATENCY_METRICS if flag}
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+DEFAULT_AVAILABILITY_PATH = os.path.join(REPO_ROOT, "logs", "live-board",
+                                         "metric-availability.tsv")
 
 
 def fetch_json(url, timeout=5):
@@ -131,6 +153,19 @@ def fmt_int(value):
     return str(int(value))
 
 
+def record_availability(status, path):
+    """Append stage-capture's availability record: one row per requested gated
+    name, every sample: ``epoch_ms<TAB>name<TAB>yes|no``. ``path=None`` writes
+    nothing (tests, dry runs) — the board text still names every absence."""
+    if not path or not status:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    epoch_ms = int(time.time() * 1000)
+    with open(path, "a", encoding="utf-8") as fh:
+        for name in sorted(status):
+            fh.write("%d\t%s\t%s\n" % (epoch_ms, name, "yes" if status[name] else "no"))
+
+
 def _elapsed(start_ms):
     if not start_ms:
         return "?"
@@ -162,9 +197,10 @@ def render_no_job(overview):
     return "\n".join(lines)
 
 
-def render_board(base_url, job, vertices, metrics):
+def render_board(base_url, job, vertices, metrics, availability_path=None):
     """One board: operator table + counters + latency. ``metrics`` is a callable
-    ``(vid, name) -> [values]`` so tests can inject a fake."""
+    ``(vid, name) -> [values]`` so tests can inject a fake; gated metrics are
+    recorded through ``record_availability(..., availability_path)``."""
     lines = ["strategy-live :: %s %s for %s (jid %s)" % (
         job.get("name"), job.get("state"), _elapsed(job.get("start-time")),
         job.get("jid"))]
@@ -204,36 +240,49 @@ def render_board(base_url, job, vertices, metrics):
         for vertex in vertices or []:
             lines.append("    %s par=%s" % (vertex.get("name"), vertex.get("parallelism")))
 
-    host = find_vertex(vertices, LIVE_OPERATORS[1])
-    hvid = host.get("id") if host else None
-    agg = find_vertex(vertices, LIVE_OPERATORS[0])
-    avid = agg.get("id") if agg else None
-
-    lines.append("== live-path counters (sum; - = not registered/never fired) ==")
-    for name in LIVE_COUNTERS:
+    lines.append("== live-path counters (sum over all vertices; - = not registered/never fired) ==")
+    gated_status = {}
+    for name, flag in LIVE_COUNTERS:
         value = None
-        for vid in (avid, hvid):
+        for vertex in vertices or []:
+            vid = vertex.get("id")
             if vid is None:
                 continue
             values = metrics(vid, name)
             if values:
                 value = (value or 0.0) + sum(values)
         lines.append("  %-42s %s" % (name, fmt_int(value)))
+        if flag:
+            gated_status[name] = value is not None
 
-    lines.append("== latency ms (worst subtask) ==")
-    for base_name in LATENCY_METRICS:
+    lines.append("== latency ms (worst subtask over all vertices) ==")
+    for base_name, flag in LATENCY_METRICS:
         cells = []
+        present = False
         for suffix in LATENCY_SUFFIXES:
             worst = None
-            for vid in (avid, hvid):
+            for vertex in vertices or []:
+                vid = vertex.get("id")
                 if vid is None:
                     continue
                 values = metrics(vid, base_name + suffix)
                 if values:
+                    present = True
                     worst = max(values) if worst is None else max(worst, max(values))
             cells.append(fmt(worst))
         lines.append("  %-38s p50=%s  p95=%s  p99=%s"
                      % (base_name, cells[0], cells[1], cells[2]))
+        if flag:
+            gated_status[base_name] = present
+
+    absent = [name for name in sorted(gated_status) if not gated_status[name]]
+    if absent:
+        lines.append("== metric availability (gated, absent this sample) ==")
+        for name in absent:
+            lines.append("  metric-availability: %s present=no (%s not observed)"
+                         % (name, GATED_FLAGS[name]))
+        lines.append("  recorded in: %s" % (availability_path or DEFAULT_AVAILABILITY_PATH))
+    record_availability(gated_status, availability_path)
 
     lines.append("note: row values are heap-only (closed-only storage); use"
                  " watch-raw / watch-candles / watch-signals for content")
@@ -270,7 +319,10 @@ def main(argv=None):
                 return 2
             vertices = detail.get("vertices", [])
             metrics = lambda vid, name: metric_values(args.url, jid, vid, name)  # noqa: E731
-            print(render_board(args.url, job, vertices, metrics))
+            availability = os.environ.get("STRATEGY_LIVE_BOARD_AVAILABILITY",
+                                          DEFAULT_AVAILABILITY_PATH)
+            print(render_board(args.url, job, vertices, metrics,
+                               availability_path=availability))
         if not args.watch:
             return 0
         time.sleep(args.watch)

@@ -217,11 +217,11 @@ class LiveBoard(unittest.TestCase):
             ("host", "numRecordsIn"): [30.0], ("host", "numRecordsOut"): [3.0],
             ("host", "busyTimeMsPerSecond"): [10.0],
             ("host", "backPressuredTimeMsPerSecond"): [0.0],
-            ("agg", "compute.market.tick.emitted"): [4.0],
-            ("host", "compute.merged.rows.emitted"): [9.0],
-            ("host", "compute.latency.tick_to_strategy_p50"): [40.0, 60.0],
-            ("host", "compute.latency.tick_to_strategy_p95"): [80.0],
-            ("host", "compute.latency.tick_to_strategy_p99"): [93.0],
+            ("agg", "compute.candles.live.emitted"): [4.0],
+            ("host", "compute.strategy.suppressed"): [9.0],
+            ("host", "compute.latency.ingest_to_monitor_p50"): [40.0, 60.0],
+            ("host", "compute.latency.ingest_to_monitor_p95"): [80.0],
+            ("host", "compute.latency.ingest_to_monitor_p99"): [93.0],
         }
         board = self.board.render_board(
             "http://x", job, vertices, lambda vid, name: values.get((vid, name), []))
@@ -229,11 +229,36 @@ class LiveBoard(unittest.TestCase):
         self.assertIn("multi-tf-aggregator", board)
         self.assertIn("strategy-host", board)
         self.assertIn("300.0", board, "sum of per-subtask in/s")
-        self.assertIn("compute.market.tick.emitted", board)
+        self.assertIn("compute.candles.live.emitted", board)
         self.assertIn("4", board)
-        self.assertIn("compute.latency.tick_to_strategy", board)
+        self.assertIn("compute.strategy.suppressed", board)
+        self.assertIn("9", board)
+        self.assertIn("compute.latency.ingest_to_monitor", board)
         self.assertIn("p50=60.0", board, "worst subtask, not the average")
         self.assertIn("p99=93.0", board)
+
+    def test_gated_metric_absence_is_recorded_not_silent(self):
+        """LEG 4 (CHG-191): the board attaches to a job it cannot change, so a
+        gated metric absent from the graph must be visible AND recorded."""
+        job = {"jid": "jid1", "name": "signal-job-compute", "state": "RUNNING",
+               "start-time": 1_000_000_000_000}
+        vertices = [{"id": "agg", "name": "multi-tf-aggregator", "parallelism": 8}]
+        values = {("agg", "compute.candles.live.emitted"): [4.0]}
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "metric-availability.tsv")
+            board = self.board.render_board(
+                "http://x", job, vertices,
+                lambda vid, name: values.get((vid, name), []),
+                availability_path=path)
+            self.assertIn("metric-availability", board)
+            self.assertIn("MULTITF_ENABLED", board)
+            rows = open(path, encoding="utf-8").read().splitlines()
+            self.assertTrue(any(r.endswith("\tcompute.candles.live.emitted\tyes")
+                                for r in rows), rows)
+            self.assertTrue(any(r.endswith("\tcompute.candles.emitted\tno")
+                                for r in rows), rows)
+            # unconditional metrics are not gated and carry no availability row
+            self.assertFalse(any("compute.dedup.first" in r for r in rows), rows)
 
     def test_render_no_job_reports_states_and_the_start_hint(self):
         overview = {"jobs": [
