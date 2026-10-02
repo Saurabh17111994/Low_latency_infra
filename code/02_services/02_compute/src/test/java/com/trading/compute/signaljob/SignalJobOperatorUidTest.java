@@ -450,7 +450,13 @@ class SignalJobOperatorUidTest {
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");
         env.put("MAX_CONCURRENT_CHECKPOINTS", "1");
-        env.put("ALLOW_FULL_REPLAY", "true");
+        // No ALLOW_FULL_REPLAY: production fresh-submits at LATEST, and the
+        // break-glass full-replay offset selection is pinned by
+        // RawSourceOffsetSelectionTest. FULL replay would make
+        // FlussSourceBuilder build a lake source whenever the live raw table
+        // is datalake-enabled (DEC-060 r2-archive-sync opt-in) and demand
+        // fluss-lake-iceberg.jar, which is not a compute test dependency
+        // (CHG-518: the 2026-10-02 step-16 UID-pin failure).
         return env;
     }
 }
