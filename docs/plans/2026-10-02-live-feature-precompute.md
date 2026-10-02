@@ -1,11 +1,13 @@
 # Live feature precompute — scope plan
 
 **Date:** 2026-10-02
-**Status:** **approved 2026-10-02; implemented and runtime-verified** (unit: 694 fresh
+**Status:** **approved 2026-10-02; implemented and certified** (unit: 694 fresh
 reports / 0 failures / 0 errors / 21 env-gated skips; mutation check caught by 5 tests;
 `make static-check` 0 failures. Runtime: smoke + clean 900 s A/B with a same-jar ON/OFF
-control — strategy-host tail S7/S9 p99 412.8 → 39.4 ms, ingestion equal-or-better, state
-growth identical; production restored on the new jar) — CHG-526 filed and certified
+control — the 2026-10-03 rerun shows ON == OFF on the strategy-host tail (p99 36.5 vs
+46.3 ms; the earlier 412.8 → 39.4 ms gap did not reproduce and is superseded: no
+production strategy reads live features, so the flag has no reader on the latency path;
+state growth identical; production restored on the new jar) — CHG-526 filed and certified
 by full gate `monday-gates-20261003-001358` at `087fc321` (19/19 PASS, 0 skipped).
 **Operator decision (2026-10-02):** every registered feature's live value is
 materialized on every incoming tick, irrespective of whether any strategy reads
