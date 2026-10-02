@@ -23,7 +23,11 @@ GUARDS = SCRIPTS / "test-pipeline-lib.sh"
 REAL_LIB = SCRIPTS / "pipeline-lib.sh"
 REPO = SCRIPTS.parents[2]
 REAL_COMPOSE = REPO / "code" / "01_platform" / "01_docker" / "docker-compose.yml"
-CLEAN = "guards: 136 passed, 0 failed"
+# The guard count grows as guards join (CHG-523 added G30: 136 -> 139); pin the
+# clean shape + a floor, not the literal, so the control keeps proving the whole
+# suite ran "0 failed" without breaking on every new guard.
+CLEAN = re.compile(r"guards: (\d+) passed, 0 failed")
+CLEAN_MIN_GUARDS = 136
 
 
 def run_guards(lib: Path = REAL_LIB, compose: Path | None = None) -> tuple[int, str]:
@@ -53,7 +57,10 @@ class ControlTest(MutationBase):
     def test_the_real_library_and_compose_pass_cleanly(self) -> None:
         rc, out = run_guards()
         self.assertEqual(rc, 0, out[-2000:])
-        self.assertIn(CLEAN, out)
+        m = CLEAN.search(out)
+        self.assertIsNotNone(m, out[-2000:])
+        self.assertGreaterEqual(int(m.group(1)), CLEAN_MIN_GUARDS,
+                                "the guard suite must still run in full")
 
 
 class PerFunctionGuardTest(MutationBase):
