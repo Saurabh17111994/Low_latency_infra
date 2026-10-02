@@ -2,6 +2,7 @@ package com.trading.compute.feature;
 
 import com.trading.compute.signaljob.MarketView;
 import java.util.function.Predicate;
+import java.util.function.ToDoubleFunction;
 import java.util.function.ToLongFunction;
 
 /**
@@ -21,18 +22,22 @@ import java.util.function.ToLongFunction;
  */
 final class MarketValueComputer implements FeatureComputer {
 
-    private final ToLongFunction<MarketView> extractor;
+    private final ToDoubleFunction<MarketView> extractor;
     private final Predicate<MarketView> present;
     private double value = Double.NaN;
 
     MarketValueComputer(ToLongFunction<MarketView> extractor, Predicate<MarketView> present) {
+        this((ToDoubleFunction<MarketView>) view -> (double) extractor.applyAsLong(view), present);
+    }
+
+    MarketValueComputer(ToDoubleFunction<MarketView> extractor, Predicate<MarketView> present) {
         this.extractor = extractor;
         this.present = present;
     }
 
     @Override
     public void onMarket(MarketView view) {
-        value = present.test(view) ? extractor.applyAsLong(view) : Double.NaN;
+        value = present.test(view) ? extractor.applyAsDouble(view) : Double.NaN;
     }
 
     @Override

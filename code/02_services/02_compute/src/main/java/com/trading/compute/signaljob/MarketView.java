@@ -140,6 +140,71 @@ public interface MarketView {
     /** Upper circuit limit in paise; 0 = not provided. */
     long upperLimitPaise();
 
+    // ── extra raw market values (2026-10-02, CHG-516) ────────────────────
+
+    // Feed-dependent optional fields: the standard token stream carries
+    // change_flag and day volume; the HFT feed carries atv/btv; imbalance,
+    // indicative close and reference price arrive only on a closing-auction
+    // (CAS) frame. Each has*() reports whether the feed ever provided the
+    // field: a provided 0 is a real value (stored as 0), a never-provided
+    // field stays absent — never a fabricated zero.
+
+    /** Cumulative day volume (both feeds). */
+    long dayVolume();
+
+    /** Feed change flag (standard token stream only). */
+    long changeFlag();
+
+    /** Closing-auction imbalance quantity (CAS frame only). */
+    long imbalanceQty();
+
+    /** Closing-auction indicative close in paise (CAS frame only). */
+    long indicativeClosePaise();
+
+    /** Reference price in paise (CAS frame only). */
+    long refPricePaise();
+
+    /** ATV (HFT feed only). */
+    long atv();
+
+    /** BTV (HFT feed only). */
+    long btv();
+
+    /** True once a tick carried a day volume. */
+    default boolean hasDayVolume() {
+        return dayVolume() != 0L;
+    }
+
+    /** True once a tick carried a change flag. */
+    default boolean hasChangeFlag() {
+        return changeFlag() != 0L;
+    }
+
+    /** True once a tick carried an imbalance quantity. */
+    default boolean hasImbalanceQty() {
+        return imbalanceQty() != 0L;
+    }
+
+    /** True once a tick carried an indicative close. */
+    default boolean hasIndicativeClose() {
+        return indicativeClosePaise() != 0L;
+    }
+
+    /** True once a tick carried a reference price. */
+    default boolean hasRefPrice() {
+        return refPricePaise() != 0L;
+    }
+
+    /** True once a tick carried an ATV. */
+    default boolean hasAtv() {
+        return atv() != 0L;
+    }
+
+    /** True once a tick carried a BTV. */
+    default boolean hasBtv() {
+        return btv() != 0L;
+    }
+
     // ── depth ladder (30) ────────────────────────────────────────────────
 
     /** Bid price at {@code level} in paise; 0 = absent. */

@@ -478,6 +478,22 @@ public class StrategyHostFunction
         m.askOrd5 = longOrZero(live, CandleLiveColumns.MKT_ASK_ORD_5);
         m.statsChangedAt = longOrZero(live, CandleLiveColumns.MKT_STATS_CHANGED_AT);
         m.depthChangedAt = longOrZero(live, CandleLiveColumns.MKT_DEPTH_CHANGED_AT);
+        // extra raw values (7; CHG-516): NULL means the feed never provided
+        // the field; a provided 0 rides as 0 and decodes as seen.
+        m.dayVolume = longOrZero(live, CandleLiveColumns.MKT_DAY_VOLUME);
+        m.dayVolumeSeen = !live.isNullAt(CandleLiveColumns.MKT_DAY_VOLUME);
+        m.changeFlag = longOrZero(live, CandleLiveColumns.MKT_CHANGE_FLAG);
+        m.changeFlagSeen = !live.isNullAt(CandleLiveColumns.MKT_CHANGE_FLAG);
+        m.imbalanceQty = longOrZero(live, CandleLiveColumns.MKT_IMBALANCE_QTY);
+        m.imbalanceQtySeen = !live.isNullAt(CandleLiveColumns.MKT_IMBALANCE_QTY);
+        m.indicativeClosePaise = longOrZero(live, CandleLiveColumns.MKT_INDICATIVE_CLOSE_PAISE);
+        m.indicativeCloseSeen = !live.isNullAt(CandleLiveColumns.MKT_INDICATIVE_CLOSE_PAISE);
+        m.refPricePaise = longOrZero(live, CandleLiveColumns.MKT_REF_PRICE_PAISE);
+        m.refPriceSeen = !live.isNullAt(CandleLiveColumns.MKT_REF_PRICE_PAISE);
+        m.atv = longOrZero(live, CandleLiveColumns.MKT_ATV);
+        m.atvSeen = !live.isNullAt(CandleLiveColumns.MKT_ATV);
+        m.btv = longOrZero(live, CandleLiveColumns.MKT_BTV);
+        m.btvSeen = !live.isNullAt(CandleLiveColumns.MKT_BTV);
         return true;
     }
 

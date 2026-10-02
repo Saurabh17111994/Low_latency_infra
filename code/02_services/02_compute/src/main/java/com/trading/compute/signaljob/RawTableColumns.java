@@ -143,6 +143,26 @@ public final class RawTableColumns {
     /** Upper circuit limit. */
     public static final int UPPER_LIMIT_PAISE = 65;
 
+    // --- extra raw market values (2026-10-02, CHG-516): the remaining
+    // feed-provided numbers carried to strategies and stored as features.
+    // Feed-dependent: change_flag is standard-token-only, atv/btv are
+    // HFT-only, imbalance/indicative/ref arrive on a closing-auction frame,
+    // volume is the cumulative day volume on both feeds. ---
+    /** Cumulative day volume. */
+    public static final int VOLUME = 26;
+    /** Feed change flag (standard token stream only). */
+    public static final int CHANGE_FLAG = 61;
+    /** Closing-auction imbalance quantity (CAS frame only). */
+    public static final int IMBALANCE_QTY = 66;
+    /** Closing-auction indicative close (CAS frame only). */
+    public static final int INDICATIVE_CLOSE_PAISE = 67;
+    /** Reference price (CAS frame only). */
+    public static final int REF_PRICE_PAISE = 68;
+    /** ATV (HFT feed only). */
+    public static final int ATV = 70;
+    /** BTV (HFT feed only). */
+    public static final int BTV = 71;
+
     public static final int FIELD_COUNT = 72;
 
     /** DDL column names in index order (diagnostics). Do not expose mutably. */
@@ -231,6 +251,13 @@ public final class RawTableColumns {
         check(OI_DAY_LOW == RawTableSchema.COLUMNS.indexOf("oi_day_low"), "OI_DAY_LOW");
         check(LOWER_LIMIT_PAISE == RawTableSchema.COLUMNS.indexOf("lower_limit_paise"), "LOWER_LIMIT_PAISE");
         check(UPPER_LIMIT_PAISE == RawTableSchema.COLUMNS.indexOf("upper_limit_paise"), "UPPER_LIMIT_PAISE");
+        check(VOLUME == RawTableSchema.COLUMNS.indexOf("volume"), "VOLUME");
+        check(CHANGE_FLAG == RawTableSchema.COLUMNS.indexOf("change_flag"), "CHANGE_FLAG");
+        check(IMBALANCE_QTY == RawTableSchema.COLUMNS.indexOf("imbalance_qty"), "IMBALANCE_QTY");
+        check(INDICATIVE_CLOSE_PAISE == RawTableSchema.COLUMNS.indexOf("indicative_close_paise"), "INDICATIVE_CLOSE_PAISE");
+        check(REF_PRICE_PAISE == RawTableSchema.COLUMNS.indexOf("ref_price_paise"), "REF_PRICE_PAISE");
+        check(ATV == RawTableSchema.COLUMNS.indexOf("atv"), "ATV");
+        check(BTV == RawTableSchema.COLUMNS.indexOf("btv"), "BTV");
     }
 
     private static void check(boolean ok, String col) {

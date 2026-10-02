@@ -58,9 +58,10 @@ class FeatureRegistryTest {
         assertFalse(FeatureRegistry.byId(2).serves(Timeframe.FIFTEEN_S));
         assertTrue(FeatureRegistry.byId(2).serves(Timeframe.ONE_M));
         // the ONE_M row carries last_price (tick) + sma + rsi (close) + the
-        // 42 market features (MARKET, all timeframes; CHG-512)
+        // 42 market features (MARKET, all timeframes; CHG-512) + the 10 extra
+        // per-candle numbers (MARKET, all timeframes; CHG-516)
         assertArrayEquals(
-                IntStream.rangeClosed(0, 44).toArray(), FeatureRegistry.idsFor(Timeframe.ONE_M));
+                IntStream.rangeClosed(0, 54).toArray(), FeatureRegistry.idsFor(Timeframe.ONE_M));
         // close-update routing carries only CLOSE features — market values are
         // fed from the snapshot, never from a close
         assertArrayEquals(new int[] {1, 2}, FeatureRegistry.closeIdsFor(Timeframe.ONE_M));

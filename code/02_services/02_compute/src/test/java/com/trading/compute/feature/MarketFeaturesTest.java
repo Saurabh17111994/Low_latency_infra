@@ -14,18 +14,25 @@ import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
 /**
- * Market-snapshot features in the merged table (2026-10-02, CHG-512): the 42
- * values the host captures from every accepted tick (12 day/flow stats + the
- * 30-column depth ladder) are registered as MARKET-cadence features, fed from
- * the shared {@link com.trading.compute.signaljob.MarketView} on every tick,
- * and stored on every sealed {@code candle_features} row of every timeframe —
- * the book/day stats as of that row's close.
+ * Market-snapshot features in the merged table (2026-10-02, CHG-512/CHG-516):
+ * the raw market values the host captures from every accepted tick — 12
+ * day/flow stats, the 30-column depth ladder, 7 extra feed-provided values
+ * (day volume, change flag, atv, btv, imbalance, indicative close, reference
+ * price) — plus 3 book-derived metrics (spread, depth imbalance, microprice)
+ * are registered as MARKET-cadence features, fed from the shared
+ * {@link com.trading.compute.signaljob.MarketView} on every tick, and stored
+ * on every sealed {@code candle_features} row of every timeframe — the
+ * book/day stats as of that row's close.
  */
 class MarketFeaturesTest {
 
     /** ids 3..44, in CandleLiveColumns transport order. */
     private static final int FIRST = 3;
     private static final int LAST = 44;
+
+    /** ids 45..54: the extra raw values + the book-derived metrics (CHG-516). */
+    private static final int EXTRA_FIRST = 45;
+    private static final int EXTRA_LAST = 54;
 
     private static final String[] NAMES = {
         // 12 stats
@@ -38,7 +45,11 @@ class MarketFeaturesTest {
         "bid_ord_1", "bid_ord_2", "bid_ord_3", "bid_ord_4", "bid_ord_5",
         "ask_px_1", "ask_px_2", "ask_px_3", "ask_px_4", "ask_px_5",
         "ask_qty_1", "ask_qty_2", "ask_qty_3", "ask_qty_4", "ask_qty_5",
-        "ask_ord_1", "ask_ord_2", "ask_ord_3", "ask_ord_4", "ask_ord_5"
+        "ask_ord_1", "ask_ord_2", "ask_ord_3", "ask_ord_4", "ask_ord_5",
+        // 7 extra raw values + 3 derived metrics
+        "day_volume", "change_flag", "atv", "btv", "imbalance_qty",
+        "indicative_close_paise", "ref_price_paise",
+        "spread_paise", "depth_imbalance", "microprice_paise"
     };
 
     /** Full book + stats: every gate open, distinct values so ids cannot alias. */
@@ -86,6 +97,20 @@ class MarketFeaturesTest {
         m.askOrd3 = 703L;
         m.askOrd4 = 704L;
         m.askOrd5 = 705L;
+        m.dayVolume = 801L;
+        m.dayVolumeSeen = true;
+        m.changeFlag = 802L;
+        m.changeFlagSeen = true;
+        m.atv = 803L;
+        m.atvSeen = true;
+        m.btv = 804L;
+        m.btvSeen = true;
+        m.imbalanceQty = 805L;
+        m.imbalanceQtySeen = true;
+        m.indicativeClosePaise = 806L;
+        m.indicativeCloseSeen = true;
+        m.refPricePaise = 807L;
+        m.refPriceSeen = true;
         m.statsChangedAt = 1_000L;
         m.depthChangedAt = 1_001L;
         return m;
@@ -93,6 +118,20 @@ class MarketFeaturesTest {
 
     /** The value {@link #fullMarket()} assigns to {@code id}. */
     private static double expectedValue(int id) {
+        if (id >= EXTRA_FIRST) {
+            switch (id) {
+                case 45: return 801.0; // day_volume
+                case 46: return 802.0; // change_flag
+                case 47: return 803.0; // atv
+                case 48: return 804.0; // btv
+                case 49: return 805.0; // imbalance_qty
+                case 50: return 806.0; // indicative_close_paise
+                case 51: return 807.0; // ref_price_paise
+                case 52: return 300.0; // spread = ask_px_1 - bid_px_1
+                case 53: return -1500.0 / 4530.0; // (1515 - 3015) / (1515 + 3015)
+                default: return 301.0; // microprice, half-up on the L1 sizes
+            }
+        }
         if (id <= 14) {
             return 101.0 + (id - FIRST);
         }
@@ -116,7 +155,8 @@ class MarketFeaturesTest {
 
     @Test
     void marketFeaturesAreRegisteredInTransportOrder() {
-        assertEquals(LAST + 1, FeatureRegistry.SIZE, "the 42 market features are ids 3..44");
+        assertEquals(EXTRA_LAST + 1, FeatureRegistry.SIZE,
+                "the 52 market features are ids 3..54");
         for (int i = 0; i < NAMES.length; i++) {
             int id = FIRST + i;
             FeatureDef def = FeatureRegistry.byId(id);
@@ -128,14 +168,14 @@ class MarketFeaturesTest {
             }
         }
         assertArrayEquals(
-                IntStream.rangeClosed(FIRST, LAST).toArray(), FeatureRegistry.MARKET_IDS);
+                IntStream.rangeClosed(FIRST, EXTRA_LAST).toArray(), FeatureRegistry.MARKET_IDS);
     }
 
     @Test
     void marketIdsRideEveryTimeframeRowButNeverTheCloseUpdate() {
         for (Timeframe tf : Timeframe.values()) {
             int[] ids = FeatureRegistry.idsFor(tf);
-            for (int id = FIRST; id <= LAST; id++) {
+            for (int id = FIRST; id <= EXTRA_LAST; id++) {
                 boolean found = false;
                 for (int candidate : ids) {
                     if (candidate == id) {
@@ -159,8 +199,8 @@ class MarketFeaturesTest {
         for (Timeframe tf : Timeframe.values()) {
             out.clear();
             features.snapshot(tf, out);
-            assertEquals(LAST - FIRST + 1, out.size(), "tf=" + tf);
-            for (int id = FIRST; id <= LAST; id++) {
+            assertEquals(EXTRA_LAST - FIRST + 1, out.size(), "tf=" + tf);
+            for (int id = FIRST; id <= EXTRA_LAST; id++) {
                 assertEquals(expectedValue(id), out.get(id), 1e-9, "id=" + id + " tf=" + tf);
             }
         }
@@ -195,10 +235,50 @@ class MarketFeaturesTest {
         depth.onMarket(depthOnly);
         out.clear();
         depth.snapshot(Timeframe.ONE_M, out);
-        assertEquals(Set.of(16, 21, 26), out.keySet(), "only the seen bid level 2 lands");
+        assertEquals(Set.of(16, 21, 26, 53), out.keySet(),
+                "only the seen bid level 2 lands; depth_imbalance derives from the visible ladder");
         assertEquals(9_902.0, out.get(16), 1e-9, "bid_px_2");
         assertEquals(12.0, out.get(21), 1e-9, "bid_qty_2");
         assertEquals(3.0, out.get(26), 1e-9, "bid_ord_2");
+        assertEquals(1.0, out.get(53), 1e-9, "one-sided book -> imbalance 1.0");
+    }
+
+    @Test
+    void extrasUseTheirOwnSeenGate() {
+        PerInstrumentFeatures features = new PerInstrumentFeatures();
+        MarketSnapshot m = new MarketSnapshot();
+        m.changeFlag = 0L;
+        m.changeFlagSeen = true;
+        m.dayVolume = 123L;
+        m.dayVolumeSeen = true;
+        features.onMarket(m);
+        Map<Integer, Double> out = new HashMap<>();
+        features.snapshot(Timeframe.ONE_M, out);
+        assertEquals(Set.of(45, 46), out.keySet(),
+                "a provided 0 stores as 0; never-provided extras stay out");
+        assertEquals(0.0, out.get(46), 1e-9, "change_flag provided as 0");
+        assertEquals(123.0, out.get(45), 1e-9, "day_volume");
+    }
+
+    @Test
+    void derivedBookMetricsFollowTheLadder() {
+        PerInstrumentFeatures features = new PerInstrumentFeatures();
+        MarketSnapshot m = new MarketSnapshot();
+        m.bidPx1 = 100L;
+        m.bidQty1 = 30L;
+        m.askPx1 = 104L;
+        m.askQty1 = 10L;
+        m.depthChangedAt = 1L;
+        features.onMarket(m);
+        Map<Integer, Double> out = new HashMap<>();
+        features.snapshot(Timeframe.ONE_M, out);
+        assertEquals(Set.of(15, 20, 25, 30, 35, 40, 52, 53, 54), out.keySet(),
+                "the seen L1 trios (ord gates on the price and stores its 0) + the derived metrics");
+        assertEquals(0.0, out.get(25), 1e-9, "bid_ord_1 present as 0 (price seen, count not provided)");
+        assertEquals(0.0, out.get(40), 1e-9, "ask_ord_1 present as 0");
+        assertEquals(4.0, out.get(52), 1e-9, "spread = ask - bid");
+        assertEquals(0.5, out.get(53), 1e-9, "depth imbalance = (30 - 10) / 40");
+        assertEquals(103.0, out.get(54), 1e-9, "microprice = (100*10 + 104*30) / 40");
     }
 
     @Test

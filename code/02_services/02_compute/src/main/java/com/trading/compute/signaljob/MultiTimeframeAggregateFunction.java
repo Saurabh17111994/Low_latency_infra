@@ -394,6 +394,16 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         setNullableLong(row, CandleLiveColumns.MKT_ASK_ORD_5, m.askOrd5);
         setNullableLong(row, CandleLiveColumns.MKT_STATS_CHANGED_AT, m.statsChangedAt);
         setNullableLong(row, CandleLiveColumns.MKT_DEPTH_CHANGED_AT, m.depthChangedAt);
+        // extra raw values (7; CHG-516): seen-aware — a provided 0 rides as
+        // 0, a never-provided field stays NULL.
+        setSeenLong(row, CandleLiveColumns.MKT_DAY_VOLUME, m.dayVolumeSeen, m.dayVolume);
+        setSeenLong(row, CandleLiveColumns.MKT_CHANGE_FLAG, m.changeFlagSeen, m.changeFlag);
+        setSeenLong(row, CandleLiveColumns.MKT_IMBALANCE_QTY, m.imbalanceQtySeen, m.imbalanceQty);
+        setSeenLong(row, CandleLiveColumns.MKT_INDICATIVE_CLOSE_PAISE, m.indicativeCloseSeen,
+                m.indicativeClosePaise);
+        setSeenLong(row, CandleLiveColumns.MKT_REF_PRICE_PAISE, m.refPriceSeen, m.refPricePaise);
+        setSeenLong(row, CandleLiveColumns.MKT_ATV, m.atvSeen, m.atv);
+        setSeenLong(row, CandleLiveColumns.MKT_BTV, m.btvSeen, m.btv);
     }
 
     /**
@@ -441,6 +451,14 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         } else {
             row.setField(index, value);
         }
+    }
+
+    /**
+     * Seen-aware market-section write (CHG-516): a field the feed provided
+     * rides even when its value is 0; a never-provided field is NULL.
+     */
+    private static void setSeenLong(GenericRowData row, int index, boolean seen, long value) {
+        row.setField(index, seen ? value : null);
     }
 
     /**
@@ -599,6 +617,68 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         }
         if ((v = longOr(tick, RawTableColumns.ASK_ORD_5, m.askOrd5)) != m.askOrd5) {
             m.askOrd5 = v; depthChanged = true;
+        }
+
+        // ── extra raw values (7; CHG-516) ────────────────────────────────
+        // Optional per feed: a non-null raw cell marks the field seen (a
+        // provided 0 is a real value), and a first sight or a changed value
+        // is a stats change, so the market trigger and the stored state can
+        // never disagree.
+        if (!tick.isNullAt(RawTableColumns.VOLUME)) {
+            v = tick.getLong(RawTableColumns.VOLUME);
+            if (!m.dayVolumeSeen || v != m.dayVolume) {
+                m.dayVolume = v;
+                m.dayVolumeSeen = true;
+                statsChanged = true;
+            }
+        }
+        if (!tick.isNullAt(RawTableColumns.CHANGE_FLAG)) {
+            v = tick.getLong(RawTableColumns.CHANGE_FLAG);
+            if (!m.changeFlagSeen || v != m.changeFlag) {
+                m.changeFlag = v;
+                m.changeFlagSeen = true;
+                statsChanged = true;
+            }
+        }
+        if (!tick.isNullAt(RawTableColumns.IMBALANCE_QTY)) {
+            v = tick.getLong(RawTableColumns.IMBALANCE_QTY);
+            if (!m.imbalanceQtySeen || v != m.imbalanceQty) {
+                m.imbalanceQty = v;
+                m.imbalanceQtySeen = true;
+                statsChanged = true;
+            }
+        }
+        if (!tick.isNullAt(RawTableColumns.INDICATIVE_CLOSE_PAISE)) {
+            v = tick.getLong(RawTableColumns.INDICATIVE_CLOSE_PAISE);
+            if (!m.indicativeCloseSeen || v != m.indicativeClosePaise) {
+                m.indicativeClosePaise = v;
+                m.indicativeCloseSeen = true;
+                statsChanged = true;
+            }
+        }
+        if (!tick.isNullAt(RawTableColumns.REF_PRICE_PAISE)) {
+            v = tick.getLong(RawTableColumns.REF_PRICE_PAISE);
+            if (!m.refPriceSeen || v != m.refPricePaise) {
+                m.refPricePaise = v;
+                m.refPriceSeen = true;
+                statsChanged = true;
+            }
+        }
+        if (!tick.isNullAt(RawTableColumns.ATV)) {
+            v = tick.getLong(RawTableColumns.ATV);
+            if (!m.atvSeen || v != m.atv) {
+                m.atv = v;
+                m.atvSeen = true;
+                statsChanged = true;
+            }
+        }
+        if (!tick.isNullAt(RawTableColumns.BTV)) {
+            v = tick.getLong(RawTableColumns.BTV);
+            if (!m.btvSeen || v != m.btv) {
+                m.btv = v;
+                m.btvSeen = true;
+                statsChanged = true;
+            }
         }
 
         if (statsChanged) {

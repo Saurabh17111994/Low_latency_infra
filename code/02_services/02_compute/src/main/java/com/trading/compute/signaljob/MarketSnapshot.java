@@ -17,7 +17,9 @@ import java.io.Serializable;
  * the row renders 0 as NULL and a later tick that does not carry the field
  * never erases the last known value. The two change clocks are set only when
  * a value actually differs from the stored one (see
- * {@code MultiTimeframeAggregateFunction#updateMarketSnapshot}).
+ * {@code MultiTimeframeAggregateFunction#updateMarketSnapshot}). The seven
+ * extra raw values (CHG-516) additionally carry a per-field seen flag, so a
+ * provided 0 is stored as 0 while a never-provided field stays NULL.
  */
 public class MarketSnapshot implements MarketView, Serializable {
 
@@ -36,6 +38,25 @@ public class MarketSnapshot implements MarketView, Serializable {
     public long oiDayLow;
     public long lowerLimitPaise;
     public long upperLimitPaise;
+
+    // ── extra raw market values (7; 2026-10-02, CHG-516) ─────────────────
+    // Feed-dependent optional fields. The seen flag records that the feed
+    // provided the field at least once, so a provided 0 stores as 0 while a
+    // never-provided field stays NULL/absent (never a fabricated zero).
+    public long dayVolume;
+    public long changeFlag;
+    public long imbalanceQty;
+    public long indicativeClosePaise;
+    public long refPricePaise;
+    public long atv;
+    public long btv;
+    public boolean dayVolumeSeen;
+    public boolean changeFlagSeen;
+    public boolean imbalanceQtySeen;
+    public boolean indicativeCloseSeen;
+    public boolean refPriceSeen;
+    public boolean atvSeen;
+    public boolean btvSeen;
 
     // ── depth ladder (30) — bid side, level 1 = best ─────────────────────
     public long bidPx1;
@@ -158,6 +179,78 @@ public class MarketSnapshot implements MarketView, Serializable {
     @Override
     public long upperLimitPaise() {
         return upperLimitPaise;
+    }
+
+    // ── extra raw market values (2026-10-02, CHG-516) ────────────────────
+
+    @Override
+    public long dayVolume() {
+        return dayVolume;
+    }
+
+    @Override
+    public long changeFlag() {
+        return changeFlag;
+    }
+
+    @Override
+    public long imbalanceQty() {
+        return imbalanceQty;
+    }
+
+    @Override
+    public long indicativeClosePaise() {
+        return indicativeClosePaise;
+    }
+
+    @Override
+    public long refPricePaise() {
+        return refPricePaise;
+    }
+
+    @Override
+    public long atv() {
+        return atv;
+    }
+
+    @Override
+    public long btv() {
+        return btv;
+    }
+
+    @Override
+    public boolean hasDayVolume() {
+        return dayVolumeSeen;
+    }
+
+    @Override
+    public boolean hasChangeFlag() {
+        return changeFlagSeen;
+    }
+
+    @Override
+    public boolean hasImbalanceQty() {
+        return imbalanceQtySeen;
+    }
+
+    @Override
+    public boolean hasIndicativeClose() {
+        return indicativeCloseSeen;
+    }
+
+    @Override
+    public boolean hasRefPrice() {
+        return refPriceSeen;
+    }
+
+    @Override
+    public boolean hasAtv() {
+        return atvSeen;
+    }
+
+    @Override
+    public boolean hasBtv() {
+        return btvSeen;
     }
 
     @Override

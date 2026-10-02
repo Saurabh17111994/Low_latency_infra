@@ -25,10 +25,12 @@ import org.apache.flink.table.types.logical.VarCharType;
  * and is not part of the pinned DDL prefix.
  *
  * <p>The trailing {@link #MARKET_SECTION_START}..{@link #FIELD_COUNT}-1
- * section is the strategy market snapshot (2026-10-01 native design): the 42
- * latest-known raw market values — 12 day/flow stats and the 30-column depth
- * ladder (5 levels × price/qty/order-count × 2 sides) — plus two change
- * clocks ({@link #MKT_STATS_CHANGED_AT}, {@link #MKT_DEPTH_CHANGED_AT}),
+ * section is the strategy market snapshot (2026-10-01 native design): the 49
+ * latest-known raw market values — 12 day/flow stats, the 30-column depth
+ * ladder (5 levels × price/qty/order-count × 2 sides) and 7 extra
+ * feed-provided values (day volume, change flag, imbalance, indicative
+ * close, reference price, atv, btv; CHG-516) — plus two change clocks
+ * ({@link #MKT_STATS_CHANGED_AT}, {@link #MKT_DEPTH_CHANGED_AT}),
  * captured by the aggregator from every accepted tick (trade or quote).
  * Null means "this feed did not provide the field" (never zero), and a value
  * is latest-known, not necessarily from the tick that formed the row.
@@ -123,10 +125,21 @@ public final class CandleLiveColumns {
     public static final int MKT_STATS_CHANGED_AT = 58;
     public static final int MKT_DEPTH_CHANGED_AT = 59;
 
-    /** Number of market-snapshot columns (42 values + 2 clocks). */
-    public static final int MARKET_FIELD_COUNT = 44;
+    // extra raw values (7; CHG-516) — appended after the clocks so every
+    // pre-CHG-516 index keeps its meaning. Seen-aware: NULL means the feed
+    // never provided the field; a provided 0 rides as 0.
+    public static final int MKT_DAY_VOLUME = 60;
+    public static final int MKT_CHANGE_FLAG = 61;
+    public static final int MKT_IMBALANCE_QTY = 62;
+    public static final int MKT_INDICATIVE_CLOSE_PAISE = 63;
+    public static final int MKT_REF_PRICE_PAISE = 64;
+    public static final int MKT_ATV = 65;
+    public static final int MKT_BTV = 66;
 
-    public static final int FIELD_COUNT = 60;
+    /** Number of market-snapshot columns (49 values + 2 clocks). */
+    public static final int MARKET_FIELD_COUNT = 51;
+
+    public static final int FIELD_COUNT = 67;
 
     /** Leading columns pinned to the merged-table DDL prefix; probes follow. */
     public static final int DDL_FIELD_COUNT = 15;
@@ -159,7 +172,9 @@ public final class CandleLiveColumns {
             "BIGINT", "BIGINT", "BIGINT", "BIGINT",
             "BIGINT", "BIGINT", "BIGINT", "BIGINT",
             "BIGINT", "BIGINT", "BIGINT", "BIGINT",
-            "BIGINT", "BIGINT", "BIGINT", "BIGINT");
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT");
 
     /**
      * DDL nullability per column (35 DDL prefix v1): exchange, symbol,
@@ -182,7 +197,9 @@ public final class CandleLiveColumns {
             true, true, true, true,
             true, true, true, true,
             true, true, true, true,
-            true, true, true, true);
+            true, true, true, true,
+            true, true, true, true,
+            true, true, true);
 
     /** DDL column names in index order (diagnostics + agreement pin). */
     private static final String[] NAMES = {
@@ -203,7 +220,9 @@ public final class CandleLiveColumns {
             "mkt_ask_px_1", "mkt_ask_px_2", "mkt_ask_px_3", "mkt_ask_px_4", "mkt_ask_px_5",
             "mkt_ask_qty_1", "mkt_ask_qty_2", "mkt_ask_qty_3", "mkt_ask_qty_4", "mkt_ask_qty_5",
             "mkt_ask_ord_1", "mkt_ask_ord_2", "mkt_ask_ord_3", "mkt_ask_ord_4", "mkt_ask_ord_5",
-            "mkt_stats_changed_at", "mkt_depth_changed_at"
+            "mkt_stats_changed_at", "mkt_depth_changed_at",
+            "mkt_day_volume", "mkt_change_flag", "mkt_imbalance_qty",
+            "mkt_indicative_close_paise", "mkt_ref_price_paise", "mkt_atv", "mkt_btv"
     };
 
     /** Immutable DDL column names in index order (diagnostics + agreement pin). */
@@ -225,7 +244,9 @@ public final class CandleLiveColumns {
             "mkt_ask_px_1", "mkt_ask_px_2", "mkt_ask_px_3", "mkt_ask_px_4", "mkt_ask_px_5",
             "mkt_ask_qty_1", "mkt_ask_qty_2", "mkt_ask_qty_3", "mkt_ask_qty_4", "mkt_ask_qty_5",
             "mkt_ask_ord_1", "mkt_ask_ord_2", "mkt_ask_ord_3", "mkt_ask_ord_4", "mkt_ask_ord_5",
-            "mkt_stats_changed_at", "mkt_depth_changed_at");
+            "mkt_stats_changed_at", "mkt_depth_changed_at",
+            "mkt_day_volume", "mkt_change_flag", "mkt_imbalance_qty",
+            "mkt_indicative_close_paise", "mkt_ref_price_paise", "mkt_atv", "mkt_btv");
 
     /** Stream type info for emitted candle_live rows (v1 DDL order). */
     public static final InternalTypeInfo<RowData> ROW_TYPE_INFO = InternalTypeInfo.ofFields(
@@ -267,7 +288,11 @@ public final class CandleLiveColumns {
                 new BigIntType(true), new BigIntType(true),
                 new BigIntType(true), new BigIntType(true),
                 new BigIntType(true), new BigIntType(true),
-                new BigIntType(true), new BigIntType(true)
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true)
             },
             NAMES.clone());
 
@@ -344,6 +369,13 @@ public final class CandleLiveColumns {
         checkIndex(MKT_ASK_ORD_5, "mkt_ask_ord_5");
         checkIndex(MKT_STATS_CHANGED_AT, "mkt_stats_changed_at");
         checkIndex(MKT_DEPTH_CHANGED_AT, "mkt_depth_changed_at");
+        checkIndex(MKT_DAY_VOLUME, "mkt_day_volume");
+        checkIndex(MKT_CHANGE_FLAG, "mkt_change_flag");
+        checkIndex(MKT_IMBALANCE_QTY, "mkt_imbalance_qty");
+        checkIndex(MKT_INDICATIVE_CLOSE_PAISE, "mkt_indicative_close_paise");
+        checkIndex(MKT_REF_PRICE_PAISE, "mkt_ref_price_paise");
+        checkIndex(MKT_ATV, "mkt_atv");
+        checkIndex(MKT_BTV, "mkt_btv");
         if (MARKET_SECTION_START != INGEST_TS + 1
                 || MARKET_FIELD_COUNT != FIELD_COUNT - MARKET_SECTION_START) {
             throw new IllegalStateException(

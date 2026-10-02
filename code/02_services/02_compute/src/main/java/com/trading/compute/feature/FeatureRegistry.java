@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.function.ToDoubleFunction;
 import java.util.function.ToLongFunction;
 
 /**
@@ -119,7 +120,32 @@ public final class FeatureRegistry {
                     marketFeature(41, "ask_ord_2", v -> v.askOrd(2), v -> v.askPxPaise(2) > 0L),
                     marketFeature(42, "ask_ord_3", v -> v.askOrd(3), v -> v.askPxPaise(3) > 0L),
                     marketFeature(43, "ask_ord_4", v -> v.askOrd(4), v -> v.askPxPaise(4) > 0L),
-                    marketFeature(44, "ask_ord_5", v -> v.askOrd(5), v -> v.askPxPaise(5) > 0L));
+                    marketFeature(44, "ask_ord_5", v -> v.askOrd(5), v -> v.askPxPaise(5) > 0L),
+                    // ── extra numbers per candle (2026-10-02, CHG-516): the
+                    // remaining feed-provided raw values — each with its own
+                    // seen gate, so a provided 0 is stored and a
+                    // never-provided field stays absent — plus three
+                    // book-derived metrics. MARKET cadence, all timeframes,
+                    // one line each (DEC-057 append-only). ──
+                    marketFeature(45, "day_volume", MarketView::dayVolume,
+                            MarketView::hasDayVolume),
+                    marketFeature(46, "change_flag", MarketView::changeFlag,
+                            MarketView::hasChangeFlag),
+                    marketFeature(47, "atv", MarketView::atv, MarketView::hasAtv),
+                    marketFeature(48, "btv", MarketView::btv, MarketView::hasBtv),
+                    marketFeature(49, "imbalance_qty", MarketView::imbalanceQty,
+                            MarketView::hasImbalanceQty),
+                    marketFeature(50, "indicative_close_paise",
+                            MarketView::indicativeClosePaise, MarketView::hasIndicativeClose),
+                    marketFeature(51, "ref_price_paise", MarketView::refPricePaise,
+                            MarketView::hasRefPrice),
+                    marketFeatureDouble(52, "spread_paise", MarketView::spreadPaise,
+                            v -> v.bidPxPaise(1) > 0L && v.askPxPaise(1) > 0L),
+                    marketFeatureDouble(53, "depth_imbalance", MarketView::depthImbalance,
+                            MarketView::hasDepth),
+                    marketFeature(54, "microprice_paise", MarketView::micropricePaise,
+                            v -> v.bidPxPaise(1) > 0L && v.askPxPaise(1) > 0L
+                                    && v.bidQty(1) > 0L && v.askQty(1) > 0L));
 
     /** Number of registered features, retired included (== registry dump size). */
     public static final int SIZE = FEATURES.size();
@@ -201,6 +227,19 @@ public final class FeatureRegistry {
     private static FeatureDef marketFeature(
             int id, String name,
             ToLongFunction<MarketView> extractor, Predicate<MarketView> present) {
+        return new FeatureDef(
+                id, name, FeatureStatus.ACTIVE, FeatureCadence.MARKET, ALL_TFS,
+                () -> new MarketValueComputer(extractor, present));
+    }
+
+    /**
+     * One MARKET-cadence registry line for a double-valued field (CHG-516):
+     * same append-only form, extractor returns the value directly (the depth
+     * imbalance lives in {@code [-1, 1]} and must not be narrowed to a long).
+     */
+    private static FeatureDef marketFeatureDouble(
+            int id, String name,
+            ToDoubleFunction<MarketView> extractor, Predicate<MarketView> present) {
         return new FeatureDef(
                 id, name, FeatureStatus.ACTIVE, FeatureCadence.MARKET, ALL_TFS,
                 () -> new MarketValueComputer(extractor, present));

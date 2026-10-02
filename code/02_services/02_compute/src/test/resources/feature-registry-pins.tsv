@@ -48,3 +48,13 @@
 42	ask_ord_3
 43	ask_ord_4
 44	ask_ord_5
+45	day_volume
+46	change_flag
+47	atv
+48	btv
+49	imbalance_qty
+50	indicative_close_paise
+51	ref_price_paise
+52	spread_paise
+53	depth_imbalance
+54	microprice_paise

@@ -22,13 +22,14 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Strategy market snapshot on forming rows (2026-10-01 native design): the
- * aggregator captures all 42 raw market values — 12 stats + the 30-column
- * depth ladder — from every accepted tick (trade or quote), tracks two change
- * clocks, and carries the section on the canonical FIFTEEN_S row only (one
- * row per tick, not six). NULL means "never seen", never a fabricated zero; a
- * later tick that does not carry a field never erases the last known value.
+ * aggregator captures all 49 raw market values — 12 stats + the 30-column
+ * depth ladder + 7 extra feed-provided values (CHG-516) — from every accepted
+ * tick (trade or quote), tracks two change clocks, and carries the section on
+ * the canonical FIFTEEN_S row only (one row per tick, not six). NULL means
+ * "never seen", never a fabricated zero; a later tick that does not carry a
+ * field never erases the last known value.
  */
-@DisplayName("market snapshot: 42 values + two clocks ride the canonical row")
+@DisplayName("market snapshot: 49 values + two clocks ride the canonical row")
 class MultiTimeframeMarketSnapshotTest {
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
@@ -75,10 +76,12 @@ class MultiTimeframeMarketSnapshotTest {
     }
 
     /**
-     * Sets all 42 market raw columns to {@code v+1 .. v+42}. Order = the raw
+     * Sets all 49 market raw columns to {@code v+1 .. v+49}. Order = the raw
      * groups: 12 stats (open/high/low/prev-close/vwap/tbq/tsq/oi/oi-high/oi-low/
      * lower/upper), then depth bid px 1..5, bid qty 1..5, bid ord 1..5,
-     * ask px 1..5, ask qty 1..5, ask ord 1..5.
+     * ask px 1..5, ask qty 1..5, ask ord 1..5, then the 7 extras (CHG-516):
+     * day volume, change flag, imbalance, indicative close, reference price,
+     * atv, btv.
      */
     private static GenericRowData marketAll(RowData base, long v) {
         GenericRowData r = (GenericRowData) base;
@@ -124,6 +127,13 @@ class MultiTimeframeMarketSnapshotTest {
         r.setField(RawTableColumns.ASK_ORD_3, v + 40);
         r.setField(RawTableColumns.ASK_ORD_4, v + 41);
         r.setField(RawTableColumns.ASK_ORD_5, v + 42);
+        r.setField(RawTableColumns.VOLUME, v + 43);
+        r.setField(RawTableColumns.CHANGE_FLAG, v + 44);
+        r.setField(RawTableColumns.IMBALANCE_QTY, v + 45);
+        r.setField(RawTableColumns.INDICATIVE_CLOSE_PAISE, v + 46);
+        r.setField(RawTableColumns.REF_PRICE_PAISE, v + 47);
+        r.setField(RawTableColumns.ATV, v + 48);
+        r.setField(RawTableColumns.BTV, v + 49);
         return r;
     }
 
@@ -234,6 +244,14 @@ class MultiTimeframeMarketSnapshotTest {
         // both change clocks (first observation changes every value)
         assertEquals(T, r.getLong(CandleLiveColumns.MKT_STATS_CHANGED_AT));
         assertEquals(T, r.getLong(CandleLiveColumns.MKT_DEPTH_CHANGED_AT));
+        // 7 extra raw values (CHG-516)
+        assertEquals(1_043L, r.getLong(CandleLiveColumns.MKT_DAY_VOLUME));
+        assertEquals(1_044L, r.getLong(CandleLiveColumns.MKT_CHANGE_FLAG));
+        assertEquals(1_045L, r.getLong(CandleLiveColumns.MKT_IMBALANCE_QTY));
+        assertEquals(1_046L, r.getLong(CandleLiveColumns.MKT_INDICATIVE_CLOSE_PAISE));
+        assertEquals(1_047L, r.getLong(CandleLiveColumns.MKT_REF_PRICE_PAISE));
+        assertEquals(1_048L, r.getLong(CandleLiveColumns.MKT_ATV));
+        assertEquals(1_049L, r.getLong(CandleLiveColumns.MKT_BTV));
 
         for (int i = 1; i < rows.size(); i++) {
             assertAllMarketColumnsNull(rows.get(i));
@@ -295,6 +313,23 @@ class MultiTimeframeMarketSnapshotTest {
         harness.processElement(tick(T0 + 1_000L, "fp-a", "TRADE", 100_00L, 10L), T0 + 1_000L);
 
         assertAllMarketColumnsNull(canonical(fastRows(), 0));
+    }
+
+    @Test
+    @DisplayName("a provided 0 extra rides as 0; a never-provided extra stays NULL (CHG-516)")
+    void extrasKeepProvidedZerosAndAbsentNulls() throws Exception {
+        openFast();
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0);
+        GenericRowData partial = tick(T0 + 1_000L, "fp-x", "TRADE", 100_00L, 10L);
+        partial.setField(RawTableColumns.CHANGE_FLAG, 0L);
+        partial.setField(RawTableColumns.VOLUME, 777L);
+        harness.processElement(partial, T0 + 1_000L);
+
+        RowData r = canonical(fastRows(), 0);
+        assertEquals(0L, r.getLong(CandleLiveColumns.MKT_CHANGE_FLAG),
+                "a provided 0 is a real value and must not become NULL");
+        assertEquals(777L, r.getLong(CandleLiveColumns.MKT_DAY_VOLUME));
+        assertTrue(r.isNullAt(CandleLiveColumns.MKT_ATV), "a never-provided extra stays NULL");
     }
 
     @Test

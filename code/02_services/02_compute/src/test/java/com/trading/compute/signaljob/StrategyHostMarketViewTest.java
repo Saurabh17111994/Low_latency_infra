@@ -240,6 +240,21 @@ class StrategyHostMarketViewTest {
         // clocks, section offsets 42..43
         assertEquals(10_042L, m.statsChangedAt());
         assertEquals(10_043L, m.depthChangedAt());
+        // 7 extra raw values, section offsets 44..50 (CHG-516)
+        assertEquals(10_044L, m.dayVolume());
+        assertEquals(10_045L, m.changeFlag());
+        assertEquals(10_046L, m.imbalanceQty());
+        assertEquals(10_047L, m.indicativeClosePaise());
+        assertEquals(10_048L, m.refPricePaise());
+        assertEquals(10_049L, m.atv());
+        assertEquals(10_050L, m.btv());
+        assertTrue(m.hasDayVolume());
+        assertTrue(m.hasChangeFlag());
+        assertTrue(m.hasImbalanceQty());
+        assertTrue(m.hasIndicativeClose());
+        assertTrue(m.hasRefPrice());
+        assertTrue(m.hasAtv());
+        assertTrue(m.hasBtv());
 
         // NULL columns decode as "not provided" (0), never as garbage.
         MarketSnapshot empty = new MarketSnapshot();
@@ -249,6 +264,23 @@ class StrategyHostMarketViewTest {
         assertEquals(0L, empty.statsChangedAt());
         assertEquals(0L, empty.depthChangedAt());
         assertFalse(empty.hasDepth());
+        assertFalse(empty.hasDayVolume());
+        assertFalse(empty.hasAtv());
+    }
+
+    @Test
+    @DisplayName("a provided 0 extra decodes as seen; a NULL extra decodes as unseen (CHG-516)")
+    void extraSeenFlagsFollowNullability() {
+        GenericRowData r = new GenericRowData(CandleLiveColumns.FIELD_COUNT);
+        r.setField(CandleLiveColumns.MKT_CHANGE_FLAG, 0L);
+        r.setField(CandleLiveColumns.MKT_DAY_VOLUME, 4_242L);
+        MarketSnapshot m = new MarketSnapshot();
+        StrategyHostFunction.decodeMarketSnapshot(m, r);
+        assertTrue(m.hasChangeFlag(), "a provided 0 is seen");
+        assertEquals(0L, m.changeFlag());
+        assertTrue(m.hasDayVolume());
+        assertEquals(4_242L, m.dayVolume());
+        assertFalse(m.hasAtv(), "a NULL extra stays unseen");
     }
 
     @Test
