@@ -128,6 +128,10 @@ class RolloutHarness(unittest.TestCase):
         self.env["STUB_METRICS"] = str(self.t / "metrics.txt")
         self.env["COMPOSE_FILE"] = str(self.t / "docker-compose.yml")
         (self.t / "docker-compose.yml").write_text("services: {}\n")
+        # CHG-523: the script sources the shared guard next to itself; the
+        # extracted harness lives in a temp dir, so point the seam at the real
+        # lib explicitly.
+        self.env["JAR_FRESHNESS_LIB"] = str(SCRIPTS / "jar-freshness.sh")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -385,88 +389,24 @@ class RolloutHarness(unittest.TestCase):
             # a savepoint rollout both directions (enable on restore, disable
             # on rollback) — the list is the only forwarding path.
             "changelog env forwarded": 'INSTRUMENT_MANIFEST_PATH CHANGELOG_STATE_BACKEND"',
-            # CHG-522: a prebuilt jar older than its module sources must refuse
-            # to deploy (measured 2026-10-02: a 12:03 jar predating the 13:43
-            # CHG-516 commit was restored while every probe stayed green).
-            "CHG-522 staleness refusal": "compute jar is STALE",
-            "CHG-522 rollback escape hatch": "ALLOW_STALE_JAR=1 — jar freshness NOT checked",
+            # CHG-523: the check itself moved to the shared jar-freshness.sh;
+            # this script must source it and call it in preflight.
+            "CHG-523 shared lib sourced": 'JAR_FRESHNESS_LIB="${JAR_FRESHNESS_LIB:-',
         }
         missing = [k for k, v in pins.items() if v not in SRC]
         self.assertEqual(missing, [], f"static pins missing: {missing}")
 
-    def test_chg522_freshness_gate_is_wired_before_the_savepoint(self):
-        call = SRC.index('require_fresh_jar "$JAR"')
+    def test_chg523_freshness_gate_is_wired_before_the_savepoint(self):
+        call = SRC.index('jar_freshness_check "$JAR"')
         self.assertLess(SRC.index("# ---- 1. preflight"), call,
                         "the freshness check belongs to the preflight")
         self.assertLess(call, SRC.index("# ---- 2. savepoint"),
                         "a stale jar must refuse BEFORE the job is stopped")
+        self.assertIn("jar-freshness.sh", SRC,
+                      "the single implementation lives in the shared lib")
         env_docs = SRC[SRC.index("Env (all optional"):SRC.index("set -euo pipefail")]
         self.assertIn("ALLOW_STALE_JAR", env_docs,
                       "the rollback escape hatch must be documented for the operator")
-        for root in ("code/02_services/02_compute/src/main",
-                     "code/02_services/02_compute/pom.xml",
-                     "code/common/src/main", "code/common/pom.xml", "code/pom.xml"):
-            self.assertIn(root, SRC,
-                          "the shaded common classes / parent pom must be covered")
-
-    # --- CHG-522: stale-jar guard (behavioural, against the extracted helper) ---
-    def _jar_fixture(self, jar_time, compute_time, common_time=None):
-        root = self.t / "fake-root"
-        for rel in ("code/02_services/02_compute/src/main", "code/common/src/main"):
-            (root / rel).mkdir(parents=True, exist_ok=True)
-        (root / "code/02_services/02_compute/pom.xml").write_text("<project/>")
-        (root / "code/common/pom.xml").write_text("<project/>")
-        (root / "code/pom.xml").write_text("<project/>")
-        (root / "code/02_services/02_compute/src/main/App.java").write_text("//")
-        (root / "code/common/src/main/Common.java").write_text("//")
-        jar = self.t / "fake-compute.jar"
-        jar.write_bytes(b"jar")
-        subprocess.run(["touch", "-d", compute_time,
-                        str(root / "code/02_services/02_compute/src/main/App.java"),
-                        str(root / "code/02_services/02_compute/pom.xml"),
-                        str(root / "code/pom.xml")], check=True)
-        subprocess.run(["touch", "-d", common_time or compute_time,
-                        str(root / "code/common/src/main/Common.java"),
-                        str(root / "code/common/pom.xml")], check=True)
-        subprocess.run(["touch", "-d", jar_time, str(jar)], check=True)
-        return root, jar
-
-    def test_chg522_stale_compute_source_refuses(self):
-        root, jar = self._jar_fixture(jar_time="2026-10-02 12:00:00",
-                                      compute_time="2026-10-02 13:00:00")
-        r = self.run_helper(f'ROOT="{root}"; require_fresh_jar "{jar}"')
-        self.assertEqual(r.returncode, 1, r.stderr)
-        ev = (self.t / "evidence.log").read_text()
-        self.assertIn("STALE", ev)
-        self.assertIn("predates", ev)
-        self.assertIn("mvn -o package", ev)
-
-    def test_chg522_stale_common_source_refuses(self):
-        root, jar = self._jar_fixture(jar_time="2026-10-02 12:00:00",
-                                      compute_time="2026-10-02 11:00:00",
-                                      common_time="2026-10-02 13:00:00")
-        r = self.run_helper(f'ROOT="{root}"; require_fresh_jar "{jar}"')
-        self.assertEqual(r.returncode, 1, r.stderr)
-        self.assertIn("Common.java", (self.t / "evidence.log").read_text())
-
-    def test_chg522_fresh_jar_passes(self):
-        root, jar = self._jar_fixture(jar_time="2026-10-02 14:00:00",
-                                      compute_time="2026-10-02 12:00:00")
-        r = self.run_helper(f'ROOT="{root}"; require_fresh_jar "{jar}"')
-        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
-        self.assertIn("jar freshness", (self.t / "evidence.log").read_text())
-
-    def test_chg522_allow_stale_jar_override(self):
-        root, jar = self._jar_fixture(jar_time="2026-10-02 12:00:00",
-                                      compute_time="2026-10-02 13:00:00")
-        r = self.run_helper(f'ROOT="{root}"; ALLOW_STALE_JAR=1 require_fresh_jar "{jar}"')
-        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
-        self.assertIn("NOT checked", (self.t / "evidence.log").read_text())
-
-    def test_chg522_missing_jar_refuses(self):
-        r = self.run_helper(f'require_fresh_jar "{self.t}/nope.jar"')
-        self.assertEqual(r.returncode, 1, r.stderr)
-        self.assertIn("not readable", (self.t / "evidence.log").read_text())
 
     def test_log_warn_guarded(self):
         # P6-502: the log/warn DEFINITIONS must guard the evidence tee.

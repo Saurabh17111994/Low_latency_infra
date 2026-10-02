@@ -842,6 +842,26 @@ grep -q '\${CHANGELOG_STATE_BACKEND:-false}' "$LIB" \
     && ok "G29 changelog defaults OFF (opt-in rollout flag)" \
     || bad "G29 changelog default is not OFF — the flag must stay opt-in"
 
+# ---- G30 (2026-10-02, CHG-523): the fresh-submit path must refuse a stale
+# prebuilt compute jar, the same rule CHG-522 closed on the rollout path. The
+# shared jar-freshness.sh is the single implementation; pipeline_submit_job
+# must call it BEFORE the docker cp, or old code deploys silently on a green
+# board (measured 2026-10-02 on the restore path).
+submit_body="$(lib_fn_body pipeline_submit_job)"
+printf '%s\n' "$submit_body" | grep -q 'jar_freshness_check "\$LIB_JAR"' \
+    && ok "G30 fresh submit checks jar freshness" \
+    || bad "G30 pipeline_submit_job does not call jar_freshness_check — a stale jar would deploy silently"
+check_at="$(printf '%s\n' "$submit_body" | grep -n 'jar_freshness_check' | head -1 | cut -d: -f1)"
+copy_at="$(printf '%s\n' "$submit_body" | grep -n 'docker cp' | head -1 | cut -d: -f1)"
+if [ -n "$check_at" ] && [ -n "$copy_at" ] && [ "$check_at" -lt "$copy_at" ]; then
+    ok "G30 freshness check precedes the jar copy (line $check_at < $copy_at)"
+else
+    bad "G30 freshness check must precede docker cp (check=${check_at:-absent} copy=${copy_at:-absent})"
+fi
+grep -qF '. "$JAR_FRESHNESS_LIB"' "$LIB" \
+    && ok "G30 pipeline-lib sources the shared jar-freshness.sh" \
+    || bad "G30 shared lib not sourced — the guard would be a second implementation"
+
 echo "---"
 echo "guards: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

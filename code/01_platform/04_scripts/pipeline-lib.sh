@@ -54,6 +54,13 @@
 
 # Paths (derived from ROOT so callers only set ROOT + OUT)
 LIB_JAR="$ROOT/code/02_services/02_compute/target/compute.jar"
+
+# CHG-523: the shared compute-jar freshness guard (single implementation, also
+# sourced by rollout-savepoint.sh). JAR_FRESHNESS_LIB is the harness seam for
+# relocated copies.
+JAR_FRESHNESS_LIB="${JAR_FRESHNESS_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/jar-freshness.sh}"
+# shellcheck source=jar-freshness.sh
+. "$JAR_FRESHNESS_LIB"
 LIB_ING_JAR="$ROOT/code/02_services/01_ingestion/target/ingestion.jar"
 LIB_BRIDGE_DIR="$ROOT/code/02_services/01_ingestion/go-bridge"
 # Path is ONE level up, not two: the manifest tree lives at
@@ -1069,6 +1076,18 @@ JAVAEOF
 
 pipeline_submit_job() {
   pipeline_require_preflight || return 1
+  # CHG-523: a prebuilt jar older than its sources would deploy old code
+  # silently on the fresh-submit path (the incident class CHG-522 closed on the
+  # rollout path). Fail before any cluster interaction.
+  local _jar_freshness_msg
+  if ! _jar_freshness_msg="$(jar_freshness_check "$LIB_JAR")"; then
+    pipeline_fail "$_jar_freshness_msg"
+    return 1
+  fi
+  case "$_jar_freshness_msg" in
+    ALLOW_STALE_JAR=1*) pipeline_log "WARN — $_jar_freshness_msg" ;;
+    *) pipeline_log "$_jar_freshness_msg" ;;
+  esac
   pipeline_log "deploying SignalJob (previews 1s, early signals on, confirm-after 4s)"
   # P6-149/150: clear FIRST — a failure while resolving the container or copying
   # the jar used to leave the previous run's ID behind, so cleanup cancelled an
