@@ -15,8 +15,8 @@ the measurement feeding it:
   * a teardown failure reaches the exit code, not just result.txt.
 
 The real script runs end to end here: the sandbox mirrors the repo layout so its
-own path derivation works, `docker`/`go`/`mvn`/`java` are PATH shims, and
-OpenObserve is a scripted HTTP stub — so the credential file, the request
+own path derivation works, `docker`/`go`/`mvn`/`java`/`pgrep` are PATH shims,
+and OpenObserve is a scripted HTTP stub — so the credential file, the request
 payload and the JSON extraction all go through the script's own code.
 """
 from __future__ import annotations
@@ -43,9 +43,13 @@ sys.path.insert(0, str(STUBS))
 import wave33_o2  # noqa: E402  (path set above)
 
 # The bench-under-test refuses double-run by design (bench-throughput.sh
-# preflight: `pgrep -f IngestionService` → preflight FAILED), so with the live
-# stack up these tests CANNOT pass — they would fail without proving anything.
-# Skip the whole module loudly instead; re-run with the stack down.
+# preflight: `pgrep -f IngestionService` → preflight FAILED), so with a live
+# IngestionService up at import these tests cannot pass — skip the whole module
+# loudly instead; re-run with the stack down. A service that appears AFTER
+# import (FullStackE2ETest's spawned JVM while this suite runs as the pooled
+# gate step 3, CHG-519) is answered by the sandbox's own pgrep shim (see PGREP
+# below): the sandbox owns its process view, so the host's state cannot fail
+# these tests. test_the_live_stack_probe pins this helper's nonce behaviour.
 def _live_ingestion_running(pattern: str = "com.trading.ingestion.IngestionService") -> bool:
     try:
         return subprocess.run(["pgrep", "-f", pattern],
@@ -138,6 +142,28 @@ exit 0
 MVN = '#!/usr/bin/env bash\nexit 0\n'
 JAVA = '#!/usr/bin/env bash\necho \'openjdk version "17.0.19" 2026-04-21\'\n'
 
+# The bench preflight scans the whole host with
+# `pgrep -f com.trading.ingestion.IngestionService` and refuses to run when it
+# finds one (double-run guard). The sandbox must own its process view the same
+# way test_ingestion_launchers.sh does: answer that one pattern from the
+# sandbox's world (nothing running) and delegate every other pattern to the
+# real pgrep, so the bench still sees any process it started itself. Without
+# this, a concurrent IngestionService fails the bench tests for the host's
+# state, not the script's behaviour — measured 2026-10-02, CHG-519: the pooled
+# gate step 3 ran while step 9's FullStackE2ETest had its service JVM up, and
+# two bench tests read the guard's refusal as a teardown/baseline failure.
+PGREP = '''\
+#!/usr/bin/env bash
+for arg in "$@"; do
+	case "$arg" in
+	*com.trading.ingestion.IngestionService*)
+		exit 1
+		;;
+	esac
+done
+exec /usr/bin/pgrep "$@"
+'''
+
 
 def free_port() -> int:
     with socket.socket() as s:
@@ -202,6 +228,7 @@ class Sandbox:
         self.shim("go", GO)
         self.shim("mvn", MVN)
         self.shim("java", JAVA)
+        self.shim("pgrep", PGREP)
 
         # ── the manifest the bench checks for ───────────────────────────────
         self.manifest = root / "manifest.csv"
