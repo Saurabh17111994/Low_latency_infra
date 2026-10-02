@@ -92,6 +92,48 @@ class IngestionServiceTest {
     }
 
     @Test
+    @DisplayName("raw vwap + open interest map from the proto onto the packet (CHG-514)")
+    void protoVwapAndOpenInterestMapToPacket() throws Exception {
+        IngestionConfig config = buildConfig();
+        RecordingConverter converter = new RecordingConverter();
+        NtpClockChecker clock = new NtpClockChecker("127.0.0.1:9", 100, false);
+        IngestionService service = new IngestionService(
+                "ing-unit-001", instruments(), converter, config, clock,
+                noopQuarantine(), noopDiscontinuity(), noopSafety());
+
+        byte[] payload = "raw-bytes".getBytes(StandardCharsets.UTF_8);
+        long now = System.currentTimeMillis();
+        TickEvent ev = TickEvent.newBuilder()
+                .setSlotId("hft-0")
+                .setMode("full")
+                .setToken(3045)
+                .setFeed("hft")
+                .setTsMs(now)
+                .setReceivedMs(now)
+                .setFeedSequenceLocal(17)
+                .setLtpPaise(234500)
+                .setClosePaise(234200)
+                .setOpenPaise(233100)
+                .setHighPaise(235000)
+                .setLowPaise(233000)
+                .setVwapPaise(234100)
+                .setLtq(50)
+                .setVolume(125000)
+                .setOpenInterest(987654)
+                .setRawPayload(ByteString.copyFrom(payload))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(payload)))
+                .build();
+
+        service.processTickEvent(ev, "hft-0", 1L);
+        awaitDrain(converter, 1);
+        TickPacket p = converter.packets.get(0);
+        assertEquals(234100L, p.averagePricePaise(),
+                "the raw vwap_paise column must carry the proto value, not 0");
+        assertEquals(987654L, p.openInterest(),
+                "the raw open_interest column must carry the proto value, not 0");
+    }
+
+    @Test
     @DisplayName("P1-081: processed tick refreshes ONLY its own slot recency (R-031 wiring)")
     void tickRefreshesOnlyItsOwnSlotRecency() throws Exception {
         IngestionConfig config = buildConfig();

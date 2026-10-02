@@ -188,6 +188,13 @@ that sees both the value and the feed, and travels on the wire as proto3
 `optional`; Java only has to honour it. Depth levels are always written (a level
 the book does not have is 0), matching the zero ladders the bridge already emits.
 
+**Correction 2026-10-02 (CHG-514):** the `vwap` and `open_interest` columns were
+declared for both feeds but the Java proto→packet copy omitted them, so every
+raw row carried 0 for both fields. `IngestionService` now maps them from the
+proto (`averagePricePaise`/`openInterest`); new rows populate them, stored rows
+keep their 0 (no backfill). Feature ids 9/10 in the CHG-512 map read from these.
+`oi_day_high`/`oi_day_low` remain HFT-absent by protocol, as the table above says.
+
 **`volume_delta` is the traded quantity for a tick** -- the difference between the
 per-token cumulative day volume and its value on the previous tick for the same
 token. Both feeds report cumulative volume, so a periodic snapshot with no trade

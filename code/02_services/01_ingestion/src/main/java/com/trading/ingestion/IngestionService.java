@@ -1403,6 +1403,7 @@ public final class IngestionService {
                     .ohlcHighPaise(ev.getHighPaise())
                     .ohlcLowPaise(ev.getLowPaise())
                     .ohlcClosePaise(ev.getClosePaise())
+                    .averagePricePaise(ev.getVwapPaise())
                     .eventFingerprint(fp.hash())
                     .fingerprintVersion(fp.version())
                     .connectionId(batchConnectionId == null || batchConnectionId.isEmpty() ? "arrow-bridge" : batchConnectionId)
@@ -1414,6 +1415,7 @@ public final class IngestionService {
                     // difference between "0" and "not reported".
                     .totalBuyQty(ev.getTotalBuyQty())
                     .totalSellQty(ev.getTotalSellQty())
+                    .openInterest(ev.getOpenInterest())
                     .volumeDelta(volumeDelta)
                     .changeFlag(ev.hasChangeFlag() ? (long) ev.getChangeFlag() : null)
                     .oiDayHigh(ev.hasOiDayHigh() ? ev.getOiDayHigh() : null)
