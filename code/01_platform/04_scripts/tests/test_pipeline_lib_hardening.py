@@ -93,7 +93,6 @@ def run_lib(tmp_path: Path, script: str, *, timeout: int = 60,
     bindir, calls = make_stubs(tmp_path)
     root = tmp_path / "root"
     (root / "code" / "02_services" / "02_compute" / "target").mkdir(parents=True, exist_ok=True)
-    (root / "code" / "02_services" / "02_compute" / "target" / "compute.jar").write_text("jar")
     # The loadgen stamp's listed inputs (P6-143) and, since CHG-439, the
     # checker the stamp delegates to: the stamp is now
     # image_staleness_check.py's value over the compose-declared COPY set, so
@@ -112,6 +111,13 @@ def run_lib(tmp_path: Path, script: str, *, timeout: int = 60,
         dst = root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / rel, dst)
+    # CHG-523: write the jar LAST. The freshness guard compares it against the
+    # fixture's own code/pom.xml, so a jar written before that file is born
+    # stale and every submit test flakes (one instance straddled the mtime
+    # boundary in the 19:08 gate; the others happened to pass). Writing it last
+    # keeps the fixture self-consistent: submit tests exercise submit behaviour,
+    # not the guard (which test_jar_freshness.py/G30 own).
+    (root / "code" / "02_services" / "02_compute" / "target" / "compute.jar").write_text("jar")
     out = tmp_path / "out"
     out.mkdir(exist_ok=True)
     env = {
