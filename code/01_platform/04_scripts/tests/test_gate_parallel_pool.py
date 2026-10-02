@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pins for the parallel step pool in run-monday-gates.sh (CHG-519).
+"""Pins for the parallel step pool in run-monday-gates.sh (CHG-519 / CHG-521).
 
 Seven of the 19 gate steps are stack-independent and independent of each other:
 the python suites (3), the Go suite (5), the E2E binaries (6), the gateway suite
@@ -9,6 +9,13 @@ summary fragment, self-limited by flock slot files — while the serial stack
 chain proceeds. This file pins the shape so the pool cannot silently grow to
 include a stack step, lose the step-6 dependency, re-run preflight under the
 gate lock, or skip the fragment flush the verdict's banner count depends on.
+
+CHG-521 adds one late-launched step: the full doc audit (10) is file-only and
+needs exactly one input from step 9 — the Java suite's fresh surefire reports —
+so full runs hand it to the pool right after "PASS: Java suite" and it overlaps
+the live drills (which write to their own reports dir). It cannot join the
+early pool (stale reports) and must not run inline in full runs (that is the
+serial tail this removes), while scoped/serial runs keep it inline.
 
 The behavioural leg sources the real pool block against stub children and
 checks the two outcomes the parent has to get right: every fragment reaches
@@ -28,9 +35,11 @@ GATE = Path(__file__).resolve().parents[1] / "run-monday-gates.sh"
 SRC = GATE.read_text(encoding="utf-8")
 
 POOL_STEPS = ["3", "5", "6", "14", "15", "17", "19"]
+# CHG-521: launched by step 9 after the Java suite, not by pool_launch_all.
+LATE_POOLED = {"10"}
 # Steps that touch the live stack, the running containers or the reactor's
 # certification surfaces: they stay in the serial chain.
-SERIAL_STEPS = {"7", "8", "9", "10", "11", "12", "13", "16", "18"}
+SERIAL_STEPS = {"7", "8", "9", "11", "12", "13", "16", "18"}
 
 STEP_HEADER = re.compile(r"^if step_active (\d+); then$")
 
@@ -74,6 +83,7 @@ OUT_DIR="$1"
 FAKE="$2"
 FAIL_STEP="${3:-}"
 BLOCK="$4"
+LATE_STEP="${5:-}"
 SUMMARY="$OUT_DIR/SUMMARY.txt"
 : >"$SUMMARY"
 GATE_POOL_CHILD=""
@@ -90,6 +100,9 @@ source "$BLOCK"
 POOL_CHILD_CMD=(bash "$FAKE")
 export FAIL_STEP
 pool_launch_all
+# CHG-521: the real gate hands step 10 to the pool from inside step 9, after
+# the early pool is already out and guarded by POOL_ENABLED; mirror that here.
+if [ -n "$LATE_STEP" ] && [ "$POOL_ENABLED" = 1 ]; then pool_launch "$LATE_STEP"; fi
 pool_drain_all
 echo "DRAIN-OK"
 """
@@ -169,9 +182,39 @@ class PoolShape(unittest.TestCase):
                         SRC.index('STEPS_RUN="$(grep -cE'),
                         "the verdict's banner count needs every fragment flushed first")
 
+    def test_doc_audit_is_late_launched_after_the_java_suite(self) -> None:
+        # CHG-521: the audit needs the Java suite's fresh XML, not the drills.
+        self.assertIn("pool_launch 10", SRC,
+                      "step 10 must be handed to the pool in full runs")
+        self.assertLess(SRC.index('echo "PASS: Java suite"'),
+                        SRC.index("pool_launch 10"),
+                        "the audit must start only after the fresh surefire reports exist")
+        self.assertLess(SRC.index("pool_launch 10"),
+                        SRC.index("MVN_FLAGS=-o make drill-live"),
+                        "the audit must overlap the drills, not run after them")
+
+    def test_doc_audit_late_launch_is_full_run_only(self) -> None:
+        self.assertIn('if [ "$POOL_ENABLED" = 1 ]; then\n\tpool_launch 10\nfi', SRC,
+                      "scoped/serial runs must keep step 10 inline")
+
+    def test_doc_audit_sync_protects_the_surefire_read(self) -> None:
+        self.assertIn("pool_require_step 10", SRC,
+                      "step 12 rewrites the XML the audit reads")
+        self.assertLess(SRC.index("pool_require_step 10"),
+                        SRC.index("if step_active 12; then"),
+                        "the audit must be reaped before step 12 starts")
+
+    def test_late_pooled_steps_are_neither_early_nor_serial(self) -> None:
+        overlap = LATE_POOLED & set(POOL_STEPS)
+        self.assertEqual(overlap, set(),
+                         f"a late step must not also launch early: {overlap}")
+        overlap = LATE_POOLED & SERIAL_STEPS
+        self.assertEqual(overlap, set(),
+                         f"a late-pooled step is no longer serial: {overlap}")
+
 
 class PoolBehaviour(unittest.TestCase):
-    def _run(self, fail_step: str = "") -> tuple[subprocess.CompletedProcess, str, Path]:
+    def _run(self, fail_step: str = "", late_step: str = "") -> tuple[subprocess.CompletedProcess, str, Path]:
         m = re.search(
             r"^# ── Parallel step pool \(GATE-PARALLEL-BEGIN\)[^\n]*\n(.*?)"
             r"^# ── Parallel step pool \(GATE-PARALLEL-END\)[^\n]*$",
@@ -185,7 +228,7 @@ class PoolBehaviour(unittest.TestCase):
         (td / "harness.sh").write_text(HARNESS, encoding="utf-8")
         r = subprocess.run(
             ["bash", str(td / "harness.sh"), str(td), str(td / "fake-child.sh"),
-             fail_step, str(td / "block.sh")],
+             fail_step, str(td / "block.sh"), late_step],
             capture_output=True, text=True, timeout=120)
         summary = (td / "SUMMARY.txt").read_text(encoding="utf-8")
         return r, summary, td
@@ -209,6 +252,22 @@ class PoolBehaviour(unittest.TestCase):
         self.assertIn("FAIL: fake step 5", summary)
         self.assertIn("FAIL: pooled step 5", summary,
                       "the parent must name the pooled step it failed on")
+
+    def test_late_launched_fragment_flushes_and_verdict_stays_clean(self) -> None:
+        # CHG-521: a step launched after pool_launch_all (the step-10 shape)
+        # still gets its fragment consumed and cannot skip the verdict count.
+        r, summary, td = self._run(late_step="10")
+        self.assertEqual(r.returncode, 0, f"harness failed:\n{r.stdout}\n{r.stderr}")
+        self.assertIn("=== [10/19] fake step 10 ===", summary)
+        self.assertNotIn("FAIL", summary)
+        self.assertEqual(list(td.glob(".summary-step*")), [],
+                         "a late fragment must be consumed, not left behind")
+
+    def test_late_launched_failure_is_reported_through_gate_fail(self) -> None:
+        r, summary, _ = self._run(late_step="10", fail_step="10")
+        self.assertEqual(r.returncode, 1, f"expected the gate to fail:\n{r.stdout}\n{r.stderr}")
+        self.assertIn("FAIL: pooled step 10", summary,
+                      "a late child's failure must fail the gate it overlaps")
 
 
 if __name__ == "__main__":

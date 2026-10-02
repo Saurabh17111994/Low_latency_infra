@@ -1108,6 +1108,16 @@ echo "=== [9/19] Java full gate (FLUSS+MANIFEST+PERF+E2E) + live Fluss drills ==
 fi
 echo "PASS: Java suite" | tee -a "$SUMMARY"
 
+# CHG-521: the doc audit (step 10) is file-only and needs exactly one input
+# from this step — the Java suite's fresh surefire reports for Layer 1b's C6.
+# It cannot join the early pool (stale reports), but it can start now: the
+# drills below write to target/surefire-reports-drills, so the plain reports
+# the audit reads stay frozen. Full runs hand it to the pool here and skip the
+# inline step 10 below; scoped/serial runs keep running it inline.
+if [ "$POOL_ENABLED" = 1 ]; then
+	pool_launch 10
+fi
+
 # Live Fluss drills (make drill-live: common + gateway classes gated on
 # FLUSS_BOOTSTRAP). Reports go to target/surefire-reports-drills, so the C6 test
 # counts in the next step still see the plain suite: a live run rewrites the same
@@ -1123,8 +1133,10 @@ echo "PASS: live Fluss drills (common + gateway, bootstrap $DRILL_BOOTSTRAP)" | 
 pool_fail_if_any
 
 # ── 3b. Full doc audit (make full-audit: scanners + sweeps + trio) ──────────
-# Runs AFTER the Java gate so Layer 1b's docs-audit C6 (test counts vs surefire
-# reports) sees fresh results. full_audit.sh is the whole doc-truth command:
+# Needs the Java suite's fresh surefire reports (Layer 1b's C6), so it cannot
+# join the early pool. CHG-521: full runs hand it to the pool inside step 9,
+# right after "PASS: Java suite", and it overlaps the drills; scoped/serial
+# runs run it inline here. full_audit.sh is the whole doc-truth command:
 # the three machine gates (stale-claim scanner --upstream — table kinds, phase
 # status, numeric drift, test counts, C6 triples; docs-audit incl. C16 env-key
 # drift + C14 change records; DDL/manifest parity) + the beyond-scanner sweeps
@@ -1215,6 +1227,9 @@ echo "PASS: evidence ownership check (container-written records group-writable)"
 fi
 # Steps 12/13 run the binaries step 6 built: wait for that pooled child first.
 pool_require_step 6
+# CHG-521: step 12 rewrites the ingestion surefire XML the audit reads; the
+# audit must be done before that rewrite can race it.
+pool_require_step 10
 if step_active 12; then
 echo "=== [12/19] SchemaAgreementTest + PerfBaselineTest explicit ===" | tee -a "$SUMMARY"
 SCHEMA_PERF_TIMEOUT_SEC="${SCHEMA_PERF_TIMEOUT_SEC:-1200}"
