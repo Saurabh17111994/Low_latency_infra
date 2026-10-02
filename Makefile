@@ -12,7 +12,7 @@ STACK_LOCK := bash code/01_platform/04_scripts/stack-lock.sh
 # fails obscurely). Set MVN_FLAGS=-o when the local cache is warm.
 MVN := mvn $(MVN_FLAGS)
 
-.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite gate-fast check-image-stale check-image-stale-fast images branch-check proto flink-image fluss-image day
+.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite gate-fast check-image-stale check-image-stale-fast images branch-check proto flink-image fluss-image day watch-raw watch-live watch-candles watch-signals
 
 # P6-302: these recipes create no file of their own name, so a stray file in the
 # repo root would make make treat the target as up to date and skip the recipe.
@@ -134,6 +134,12 @@ help:
 	@echo "              or re-electing. Result: exit 0 = every measurable gate passed; the legs the"
 	@echo "              live schema cannot measure are printed as UNAVAILABLE, not as failures"
 	@echo "  holistic-quick   same harness, short phases (SMOKE_S=60 MAIN_S=300)"
+	@echo "  watch-raw [N]        live table view of raw_table_1 (latest N ticks; Ctrl+C to stop)"
+	@echo "  watch-live           strategy-host live-path flow board (Flink REST: throughput,"
+	@echo "                       counters, tick->strategy / ingest->strategy p50/p95/p99)"
+	@echo "  watch-candles [N]    the newest candle_features rows (candle + feature map)"
+	@echo "  watch-signals [N]    the newest Signal_Candidates rows; ARGS=\"--full\" shows the"
+	@echo "                       v2 audit (market snapshot at fire time), --rule R filters"
 
 env:
 	@if [ ! -f code/01_platform/01_docker/.env ]; then \
@@ -173,6 +179,21 @@ up:
 #   make day ARGS="start|status|stop"
 day:
 	@DAY_COMPOSE='$(COMPOSE)' bash code/01_platform/04_scripts/day-run.sh $(ARGS)
+
+# --- Watch the pipeline data (operator eyeball commands; docs/commands/COMMANDS.md) ---
+# Four table views along the chain: raw ticks -> live host state -> sealed
+# candle+features -> fired signals. All read-only.
+watch-raw:
+	@./show-ticks.sh $(or $(ARGS),20)
+
+watch-live:
+	@python3 code/01_platform/04_scripts/strategy_live_board.py $(ARGS)
+
+watch-candles:
+	@bash code/01_platform/04_scripts/candle-features-table.sh --mode tail --rows $(or $(ARGS),20)
+
+watch-signals:
+	@bash code/01_platform/04_scripts/signal-candidates-table.sh --rows $(or $(ARGS),20)
 
 down:
 	$(STACK_LOCK) $(COMPOSE) down

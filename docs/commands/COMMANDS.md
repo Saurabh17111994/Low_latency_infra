@@ -140,6 +140,31 @@ new envelope must name is `/healthz` `gate_epoch`.
 | Fluss rule census | `java -cp $FLUSS_PROBE_CP FlussRuleCounter Signal_Candidates localhost:9123` | Full-bucket, **uncapped** `rule=<id> count=<n>` census of a signal table. A bucket is drained only after 3 consecutive empty polls (500 ms confirmation polls), and `rule_id` must be STRING. Exit 0 = census printed, 1 = runtime failure, 2 = unusable input. The soak gate's host-N7 leg fails loudly when the census fails (wave 13) |
 | Probe census fixture | `java -cp $FLUSS_PROBE_CP ProbeFixtureSeeder create localhost:9123` (or `drop`) | Creates the two scratch KV tables (`zz_probe_fixture_intent`, `zz_probe_fixture_signal`) the probe census legs are checked against: 5 intent rows, 3 signal rows, 3 orphans. `create` drops first (idempotent) and waits until the server's own row count agrees with what it wrote, because that count is what the probe compares against (CHG-221). Both tables are dropped by the test that seeds them; a leaked one shows up in the catalog count |
 
+## D2. Watch the data (operator eyeball commands — table views along the chain)
+
+Four read-only views, one per stage: raw ticks → live strategy-host state → sealed
+candle+features → fired signals. Every view prints a table; nothing here mutates the
+stack. Run once, or keep re-running while data flows.
+
+| # | Stage | Command | What the table shows |
+|---|---|---|---|
+| 1 | Raw ticks (Fluss `raw_table_1`) | `make watch-raw ARGS=20` | The newest persisted ticks: `event_time | token | exchange | symbol | price | qty | tick_type | validity | log_offset | storage_time`. Live follow — refreshes every second, `Ctrl+C` to stop. |
+| 2 | Strategy host live path (Flink memory) | `make watch-live` | The SignalJob's live-path flow from the Flink REST API: `multi-tf-aggregator` / `strategy-host` records in-out per second, busy and backpressure, the live-path counters (`compute.candles.live.tick.emitted`, `compute.market.tick.emitted`, `compute.features.*`, `compute.market.row.legacy`), and `compute.latency.tick_to_strategy` / `compute.latency.ingest_to_strategy` p50/p95/p99 (worst subtask). No running SignalJob prints the last job states + how to start it. |
+| 3 | Sealed candles + features (Fluss `candle_features`) | `make watch-candles ARGS=20` | The first scanned rows with `token, tf, window_start, close_paise, sealed`, and the `features MAP<INT,DOUBLE>` (registry ids) per row, plus per-tf/sealed/forming counts. One sealed row per closed window per timeframe. |
+| 4 | Fired signals (Fluss `Signal_Candidates`) | `make watch-signals ARGS=20` | The newest signals, newest detection time first: `detected_ist | symbol | token | rule | side | action | qty | limit_px | tf | trigger | range | candidate`. `ARGS="--full"` adds the complete v2 audit JSON in `score_inputs` — the market snapshot (bid/ask ladder, day stats, clocks) the host handed the strategy at fire time; `--rule n7-range-breakout-v1` filters. |
+
+**Honest limit on #2.** Flink operator state is heap-only (DEC-059 closed-only storage: the
+live path deliberately writes nothing to Fluss), so no external reader can print the live
+rows themselves. `make watch-live` proves the host is reading and what it consumes/produces;
+row *content* is verified from the other three views — the source ticks (#1), the sealed rows
+the host writes (#3), and the audit stamped on each fire (#4).
+
+**Prereqs.** #1 needs the ingestion JAR (`make build`). #3/#4 need the ingestion classpath
+file + `javac` and run a probe inside `01_docker_trading-net` (they compile on the host,
+then `java` runs in the JRE-only image). #2 needs only the published Flink REST port
+(`FLINK_REST_URL` / `--url` override, default `http://localhost:8081`). All four are safe to
+run during a live session; none takes the stack lock or writes to a table.
+
 ## E. Production / VM provisioning (future 4VM)
 
 | Action | Command | What it does |
