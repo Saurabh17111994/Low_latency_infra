@@ -225,7 +225,12 @@ class BridgeShutdownRegressionTest {
     }
 
     private static String tail(CapturingAppender capture) {
-        List<String> messages = capture.messages;
+        // Snapshot before slicing: the appender appends concurrently (bridge
+        // stderr drain), and iterating a CopyOnWriteArrayList subList throws
+        // ConcurrentModificationException when the backing list grows between
+        // size() and String.join (hit in gate monday-gates-20261002-234232,
+        // step 9, 2026-10-02). List.copyOf takes an atomic snapshot.
+        List<String> messages = List.copyOf(capture.messages);
         int from = Math.max(0, messages.size() - 40);
         return String.join("\n", messages.subList(from, messages.size()));
     }
