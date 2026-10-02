@@ -313,6 +313,10 @@ func main() {
 								binary.LittleEndian.PutUint32(frame[4:8], tok)
 								binary.LittleEndian.PutUint32(frame[8:12], uint32(p))
 								binary.LittleEndian.PutUint32(frame[12:16], qty)
+								// CHG-513: a real full tick also carries the day stats
+								// and the 5-level book; without them the compute market
+								// snapshot's presence gates stay closed.
+								fillBookAndStats(frame, p, tok)
 								binary.LittleEndian.PutUint64(frame[64:72], volumes.add(tok, qty))
 								binary.LittleEndian.PutUint64(frame[180:188], uint64(time.Now().UnixNano()))
 								lastFrames.Store(tok, append([]byte(nil), frame...))
@@ -414,6 +418,7 @@ func main() {
 					// LTQ is this tick's 25; Volume is the per-token cumulative
 					// counter, bumped per tick below (Q1=B cumulative semantics).
 					binary.LittleEndian.PutUint32(tickerFrame[12:16], 25)
+					fillBookAndStats(tickerFrame, 15050, 757614)
 					binary.LittleEndian.PutUint64(tickerFrame[64:72], 0)
 					wg.Add(1)
 					go func() {
@@ -478,6 +483,7 @@ func main() {
 					binary.LittleEndian.PutUint32(full[8:12], 15050)
 					// LTQ is this frame's 25; Volume is the cumulative counter.
 					binary.LittleEndian.PutUint32(full[12:16], 25)
+					fillBookAndStats(full, 15050, 757614)
 					binary.LittleEndian.PutUint64(full[64:72], volumes.add(757614, 25))
 					// A real broker stamps every frame with send-time nanoseconds
 					// (bridge ts_ms = ts/1e6). Without it ts_ms=0 and the
@@ -540,4 +546,35 @@ func validateRealRateHz(hz int) error {
 		return fmt.Errorf("-real-rate-hz %d must be positive and divide 1000", hz)
 	}
 	return nil
+}
+
+// fillBookAndStats writes the full-frame day-stats + 5-level book section
+// (offsets 16..64 and 72..196) anchored on ltp. The real feeds populate these
+// fields; before CHG-513 the fake broker left them zero, so the compute market
+// snapshot's presence gates (stats clock / per-level price > 0) stayed closed
+// and the operator's 42 market feature values never reached the sealed
+// candle_features rows. Layout mirrors cmd/gen-corpus/buildFullFrame, which
+// the golden corpus pins byte-for-byte against the bridge decoder.
+func fillBookAndStats(f []byte, ltp int32, tok uint32) {
+	binary.LittleEndian.PutUint32(f[16:20], uint32(ltp-5))   // vwap
+	binary.LittleEndian.PutUint32(f[20:24], uint32(ltp-50))  // day open
+	binary.LittleEndian.PutUint32(f[24:28], uint32(ltp+30))  // day high
+	binary.LittleEndian.PutUint32(f[28:32], uint32(ltp-20))  // prev close
+	binary.LittleEndian.PutUint32(f[32:36], uint32(ltp-80))  // day low
+	binary.LittleEndian.PutUint32(f[40:44], uint32(ltp-500)) // lower circuit
+	binary.LittleEndian.PutUint32(f[44:48], uint32(ltp+500)) // upper circuit
+	// Cumulative-style counters, token-seeded so different tokens differ.
+	binary.LittleEndian.PutUint64(f[48:56], 1000+uint64(tok%900)) // total buy qty
+	binary.LittleEndian.PutUint64(f[56:64], 2000+uint64(tok%900)) // total sell qty
+	for i := 0; i < 5; i++ {
+		binary.LittleEndian.PutUint32(f[72+i*4:], uint32(ltp-1-int32(i))) // bid px
+		binary.LittleEndian.PutUint32(f[92+i*4:], uint32(ltp+1+int32(i))) // ask px
+		binary.LittleEndian.PutUint32(f[112+i*4:], uint32(100*(i+1)))     // bid qty
+		binary.LittleEndian.PutUint32(f[132+i*4:], uint32(50*(i+1)))      // ask qty
+		binary.LittleEndian.PutUint16(f[152+i*2:], uint16(3+i))           // bid orders
+		binary.LittleEndian.PutUint16(f[162+i*2:], uint16(2+i))           // ask orders
+	}
+	binary.LittleEndian.PutUint64(f[172:180], 500000+uint64(tok%10000)) // open interest
+	binary.LittleEndian.PutUint32(f[188:192], 1000)                     // atv
+	binary.LittleEndian.PutUint32(f[192:196], 2000)                     // btv
 }

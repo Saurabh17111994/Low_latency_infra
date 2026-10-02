@@ -199,7 +199,10 @@ volume sums **this**, never `last_qty`: a single trade's size under-counts when
 several trades land between two snapshots. The local fake broker (`faketool`)
 reports cumulative volume on the same wire field (CHG-343) -- its LTQ stays the
 per-tick quantity -- so a local run exercises the real delta semantics instead
-of feeding the tracker a counter that moved backwards.
+of feeding the tracker a counter that moved backwards. Since CHG-513 the fake
+broker also fills the full frame's day-stats and 5-level book section, so a
+fake-broker run populates the market-snapshot features (CHG-512) the same way a
+live feed does.
 
 **`tick_type` describes the row, not the subscription mode.** A full-mode snapshot
 is `TRADE` only when `volume_delta > 0`, otherwise `QUOTE`. `validity_state` keeps
