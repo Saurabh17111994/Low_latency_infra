@@ -418,7 +418,7 @@ public class StrategyHostFunction
     }
 
     /**
-     * Decodes the 44-column market section of the canonical forming row into
+     * Decodes the 51-column market section of the canonical forming row into
      * the slot's {@link MarketSnapshot} (2026-10-01 native design). NULL means
      * "never seen / not provided" -> 0, the {@link MarketView} convention; the
      * aggregator already carries the latest-known value of every field on this

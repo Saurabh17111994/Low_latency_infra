@@ -53,9 +53,10 @@ public final class RawTableColumns {
      */
     public static final int VOLUME_DELTA = 27;
 
-    // --- strategy market snapshot (2026-10-01 native design): the 42 raw
+    // --- strategy market snapshot (2026-10-01 native design): the 42 base raw
     // market values the signal job carries to strategies on the canonical
-    // forming row (12 stats + the 30-column depth ladder). Add a constant when
+    // forming row (12 stats + the 30-column depth ladder; the 7 CHG-516 extras
+    // are listed in their own section below). Add a constant when
     // a reader lands; MultiTimeframeAggregateFunction#updateMarketSnapshot is
     // the only reader today. ---
     /** Day open. */

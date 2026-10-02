@@ -185,7 +185,7 @@ class MultiTimeframeMarketSnapshotTest {
     }
 
     @Test
-    @DisplayName("all 42 values + both clocks ride the FIFTEEN_S row; the other five stay NULL")
+    @DisplayName("all 49 values + both clocks ride the FIFTEEN_S row; the other five stay NULL")
     void canonicalRowCarriesEverythingOthersStayNull() throws Exception {
         openFast();
         long T0 = ist(2026, 9, 4, 10, 0, 0, 0);

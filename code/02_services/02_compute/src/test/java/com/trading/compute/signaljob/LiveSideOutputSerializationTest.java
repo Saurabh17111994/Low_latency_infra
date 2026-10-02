@@ -42,6 +42,6 @@ class LiveSideOutputSerializationTest {
         RowData back = ser.deserialize(in);
         System.out.println("round-trip arity = " + back.getArity() + " class = " + back.getClass().getName());
         assertEquals(CandleLiveColumns.FIELD_COUNT, back.getArity(),
-                "side output serializer must preserve the 60-field market section");
+                "side output serializer must preserve the full CandleLiveColumns arity");
     }
 }

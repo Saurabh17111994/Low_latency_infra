@@ -74,7 +74,7 @@ public final class FeatureRegistry {
                             FeatureCadence.CLOSE,
                             EnumSet.of(Timeframe.ONE_M, Timeframe.FIVE_M, Timeframe.FIFTEEN_M),
                             () -> new RsiComputer(14)),
-                    // ── market snapshot (2026-10-02, CHG-512): the 42 values the
+                    // ── market snapshot (2026-10-02, CHG-512): the 42 base values the
                     // host captures from every accepted tick, in CandleLiveColumns
                     // transport order (stats first, then the attribute-major depth
                     // ladder). MARKET cadence, all timeframes — every sealed row
@@ -221,8 +221,8 @@ public final class FeatureRegistry {
     /**
      * One MARKET-cadence registry line (CHG-512): all timeframes, value read
      * from the shared market snapshot by the given extractor, stored only when
-     * the presence gate says the group/level was observed. Keeps the 42 market
-     * lines one line each, in the DEC-057 append-only form.
+     * the presence gate says the group/level was observed. Keeps each MARKET
+     * line one line each, in the DEC-057 append-only form.
      */
     private static FeatureDef marketFeature(
             int id, String name,

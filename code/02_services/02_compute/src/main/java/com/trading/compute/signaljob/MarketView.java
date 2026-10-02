@@ -2,8 +2,9 @@ package com.trading.compute.signaljob;
 
 /**
  * Strategy-facing, read-only view of one instrument's latest market snapshot
- * (2026-10-01 native design): the 42 raw market values the platform captures
- * from every accepted tick (trade or quote) plus two freshness clocks.
+ * (2026-10-01 native design; 7 extras added 2026-10-02, CHG-516): the 49 raw
+ * market values the platform captures from every accepted tick (trade or
+ * quote) plus two freshness clocks.
  *
  * <p><b>Semantics.</b> {@code 0} means "not provided by this feed/mode or not
  * yet seen" — never a fabricated zero. A value is latest-known, not

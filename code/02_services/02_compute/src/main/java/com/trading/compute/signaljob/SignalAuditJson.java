@@ -6,8 +6,9 @@ package com.trading.compute.signaljob;
  *
  * <p><b>Why.</b> Signal rows are immutable, so the audit is the one chance to
  * record <i>why</i> a strategy fired. v1 stamped only N7's seven setup fields;
- * the market state the rule actually read (the 42 latest-known values + the
- * two change clocks), the candle in context, and the fire path were lost. v2
+ * the market state the rule actually read (the 42 base latest-known values +
+ * the two change clocks; the seven CHG-516 extras are feature-only and not in
+ * this document), the candle in context, and the fire path were lost. v2
  * carries all of it as one self-contained JSON document, so "why did this
  * signal fire?" is answered by the row itself — no raw-tick reconstruction.
  *

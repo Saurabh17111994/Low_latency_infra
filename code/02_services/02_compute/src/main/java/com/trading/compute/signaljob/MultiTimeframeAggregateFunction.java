@@ -119,7 +119,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     /**
      * Market-only rows on the fast feed (2026-10-02, CHG-505): when true, a
      * non-trade tick that actually changed the market snapshot emits one
-     * {@code TF="MKT"} row (identity + the 44-column market section, no OHLC)
+     * {@code TF="MKT"} row (identity + the 51-column market section, no OHLC)
      * to {@link #LIVE_TICK_TAG}, so the strategy host can evaluate book/stat
      * rules without waiting for a trade. Wired from
      * {@code STRATEGY_MARKET_TICK_ENABLED}; inert when the fast feed is off.
@@ -336,7 +336,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         // reports compute.latency.ingest_to_strategy. Sentinel Long.MIN_VALUE
         // means unknown — never fabricated, never persisted.
         row.setField(CandleLiveColumns.INGEST_TS, acc.lastIngestTs);
-        // Strategy market snapshot (2026-10-01 native design): 42 latest-known
+        // Strategy market snapshot (2026-10-01 native design): 49 latest-known
         // raw values + two change clocks. Canonical-row transport: only the
         // FIFTEEN_S row carries the section (one row per accepted tick, not
         // six — 352 B/tick instead of 2,112 B/tick), so the host decodes it
@@ -348,7 +348,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         return row;
     }
 
-    /** Writes the 44-column market section (42 values + 2 clocks) onto the canonical row. */
+    /** Writes the 51-column market section (49 values + 2 clocks) onto the canonical row. */
     private static void writeMarketSection(GenericRowData row, MarketSnapshot m) {
         setNullableLong(row, CandleLiveColumns.MKT_TOTAL_BUY_QTY, m.totalBuyQty);
         setNullableLong(row, CandleLiveColumns.MKT_TOTAL_SELL_QTY, m.totalSellQty);
@@ -408,7 +408,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
 
     /**
      * Market-only row (2026-10-02, CHG-505): a {@link CandleLiveColumns} layout
-     * with {@code TF="MKT"} — identity and the 44-column market section are
+     * with {@code TF="MKT"} — identity and the 51-column market section are
      * meaningful; the candle prefix is type-defaults (0 / event time), never
      * read on a market row and never persisted. Transport only.
      */
@@ -463,7 +463,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
 
     /**
      * Strategy market snapshot capture (2026-10-01 native design): read the
-     * 42 raw market values strategies consume from every accepted tick —
+     * 49 raw market values strategies consume from every accepted tick —
      * trade or quote. Latest non-null wins per field: a tick that does not
      * carry a field (lighter feed mode, other tick type) never erases the
      * last known value, and a field never seen stays 0 (rendered NULL on the

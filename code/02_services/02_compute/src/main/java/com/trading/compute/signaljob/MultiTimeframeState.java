@@ -9,7 +9,7 @@ import java.io.Serializable;
  * never as Flink managed {@code ValueState} (intentional amnesia: a restore
  * restarts empty and rebuilds from live ticks). Holds six forming
  * {@link CandleAccumulator}s, six {@link MultiTimeframeClosedRing}s (15 each),
- * a nested {@link MarketSnapshot} (42 values + two change clocks), a
+ * a nested {@link MarketSnapshot} (49 values + two change clocks), a
  * discontinuity marker, and monotonic gate fields. Plain
  * {@link Serializable} with D1 public fields for Flink POJO extraction — same
  * rule as {@link CandleAccumulator}.

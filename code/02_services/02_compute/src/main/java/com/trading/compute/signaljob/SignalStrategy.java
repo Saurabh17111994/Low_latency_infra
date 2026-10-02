@@ -167,7 +167,7 @@ public interface SignalStrategy extends Serializable {
      * state when a non-trade tick changed it and no forming-candle row was
      * emitted ({@code STRATEGY_MARKET_TICK_ENABLED}). The row is a
      * {@link CandleLiveColumns} layout with {@code TF="MKT"} — identity and the
-     * 44-column market section are meaningful; the candle columns are null.
+     * 51-column market section are meaningful; the candle columns are null.
      *
      * <p><b>Default no-op</b>, so every strategy written before this callback
      * behaves exactly as before. A strategy that wants to fire on book/stat
