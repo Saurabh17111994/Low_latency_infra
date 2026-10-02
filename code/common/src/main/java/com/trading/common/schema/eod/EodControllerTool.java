@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
@@ -607,24 +608,34 @@ public final class EodControllerTool {
                    String tieringSet, boolean apply, boolean dryRun, boolean approve) {
 
         static Options parse(String[] args) {
+            return parse(args, System.getenv()::get);
+        }
+
+        /**
+         * Parse with an explicit environment lookup (2026-10-02, CHG-515). The
+         * CLI entry passes {@code System.getenv()::get}; unit tests pass a clean
+         * or scripted lookup, so the documented defaults are pinned regardless
+         * of the ambient environment — the gate exports {@code EOD_TABLES} for
+         * the DEC-060 preflight, which must not change this parse's result.
+         */
+        static Options parse(String[] args, Function<String, String> env) {
             if (args.length == 0) {
                 throw new IllegalArgumentException("subcommand required "
                         + "(status|run|extend|reconcile|reset|tiering)");
             }
             String subcommand = args[0];
-            String bootstrap = System.getenv().getOrDefault("FLUSS_BOOTSTRAP", "localhost:9123");
-            String database = System.getenv().getOrDefault("FLUSS_DATABASE", "default");
-            String stateTable = System.getenv().getOrDefault("EOD_STATE_TABLE",
-                    "eod_offload_state");
-            String tablesRaw = System.getenv().getOrDefault("EOD_TABLES", null);
-            Duration ttlDefault = parseEnvTtl("EOD_TTL", Duration.ofDays(3));
-            Duration safetyFloor = parseEnvTtl("EOD_SAFETY_FLOOR", Duration.ofDays(1));
-            Duration extension = parseEnvTtl("EOD_EXTENSION", Duration.ofDays(30));
-            Duration leaseTtl = parseEnvTtl("EOD_LEASE_TTL", Duration.ofMinutes(30));
-            String zone = System.getenv().getOrDefault("EOD_ZONE", "Asia/Kolkata");
+            String bootstrap = envOr(env, "FLUSS_BOOTSTRAP", "localhost:9123");
+            String database = envOr(env, "FLUSS_DATABASE", "default");
+            String stateTable = envOr(env, "EOD_STATE_TABLE", "eod_offload_state");
+            String tablesRaw = envOr(env, "EOD_TABLES", null);
+            Duration ttlDefault = parseEnvTtl(env, "EOD_TTL", Duration.ofDays(3));
+            Duration safetyFloor = parseEnvTtl(env, "EOD_SAFETY_FLOOR", Duration.ofDays(1));
+            Duration extension = parseEnvTtl(env, "EOD_EXTENSION", Duration.ofDays(30));
+            Duration leaseTtl = parseEnvTtl(env, "EOD_LEASE_TTL", Duration.ofMinutes(30));
+            String zone = envOr(env, "EOD_ZONE", "Asia/Kolkata");
             String runDate = null;
-            String schemaVersion = System.getenv().getOrDefault("EOD_SCHEMA_VERSION", "1");
-            String offloadMode = System.getenv().getOrDefault("EOD_OFFLOAD", "none");
+            String schemaVersion = envOr(env, "EOD_SCHEMA_VERSION", "1");
+            String offloadMode = envOr(env, "EOD_OFFLOAD", "none");
             String singleTable = null;
             String tieringSet = null;
             boolean tieringList = false;
@@ -716,12 +727,19 @@ public final class EodControllerTool {
             return args[i];
         }
 
-        private static Duration parseEnvTtl(String key, Duration fallback) {
-            String raw = System.getenv(key);
+        private static Duration parseEnvTtl(Function<String, String> env, String key,
+                Duration fallback) {
+            String raw = env.apply(key);
             if (raw == null || raw.isBlank()) {
                 return fallback;
             }
             return EodRetentionPolicy.parseTtl(raw);
+        }
+
+        /** Null-safe env lookup with a fallback for a missing key. */
+        private static String envOr(Function<String, String> env, String key, String fallback) {
+            String raw = env.apply(key);
+            return raw == null ? fallback : raw;
         }
     }
 }

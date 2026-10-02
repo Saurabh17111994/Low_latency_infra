@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /** EOD controller CLI unit tests (SCH-23): option parsing + pure helpers. */
@@ -17,8 +18,11 @@ class EodControllerToolTest {
 
     @Test
     void parseDefaultsStateTableAndZone() {
+        // CHG-515: the defaults are pinned through an explicit empty lookup —
+        // never through the ambient environment (the gate exports EOD_TABLES
+        // for the DEC-060 preflight).
         EodControllerTool.Options opts = EodControllerTool.Options.parse(
-                new String[] {"status"});
+                new String[] {"status"}, key -> null);
         assertThat(opts.subcommand()).isEqualTo("status");
         assertThat(opts.stateTable()).isEqualTo("eod_offload_state");
         assertThat(opts.zone()).isEqualTo("Asia/Kolkata");
@@ -26,6 +30,16 @@ class EodControllerToolTest {
         assertThat(opts.safetyFloor()).isEqualTo(Duration.ofDays(1));
         assertThat(opts.extension()).isEqualTo(Duration.ofDays(30));
         assertThat(opts.offloadMode()).isEqualTo("none");
+    }
+
+    @Test
+    void parseHonorsTheTablesEnvironment() {
+        // CHG-515: EOD_TABLES is the DEC-060 archive list and must parse
+        // exactly like --tables (trimmed, empty entries dropped).
+        EodControllerTool.Options opts = EodControllerTool.Options.parse(
+                new String[] {"status"},
+                Map.of("EOD_TABLES", "raw_table_1, candle_features")::get);
+        assertThat(opts.tables()).containsExactly("raw_table_1", "candle_features");
     }
 
     @Test
