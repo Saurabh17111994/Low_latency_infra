@@ -69,6 +69,26 @@ fn scenario_distribution_line(
     )
 }
 
+/// P3-184/XC-1: every invariant must hold *before* anything is persisted, so a
+/// failing check can never leave a non-conforming evidence.json on disk (a
+/// secret-shaped key must not reach disk before `assert_no_secrets` fires).
+fn verify_and_write(
+    out_dir: &std::path::Path,
+    evidence: &Value,
+) -> anyhow::Result<std::path::PathBuf> {
+    assert_no_secrets(evidence);
+    assert_eq!(evidence["summary"]["shadow_new_broker_commands"], 0);
+    assert!(
+        evidence["shadow_positions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["expected_match"] == true),
+        "all shadow positions must expect a match"
+    );
+    write_json(out_dir, "evidence.json", evidence)
+}
+
 fn main() -> Result<()> {
     let run = Run::start("t9-paper-25")?;
 
@@ -109,17 +129,7 @@ fn main() -> Result<()> {
         }),
     ));
 
-    let evidence_path = write_json(&run.output_dir, "evidence.json", &evidence)?;
-    assert_no_secrets(&evidence);
-    assert_eq!(evidence["summary"]["shadow_new_broker_commands"], 0);
-    assert!(
-        evidence["shadow_positions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|p| p["expected_match"] == true),
-        "all shadow positions must expect a match"
-    );
+    let evidence_path = verify_and_write(&run.output_dir, &evidence)?;
 
     println!(
         "T9 paper-25 evidence written to {}",
@@ -184,5 +194,21 @@ mod p3_182_tests {
             "scenario vectors: 10 FILLED / 5 PARTIAL / 5 REJECT / 3 UNKNOWN / 2 DISCONNECT (expectations, not observed)",
             "the documented contract must render exactly as the literal it replaces did"
         );
+    }
+
+    #[test]
+    fn failed_invariant_never_persists_evidence() {
+        // XC-1/P3-184: a failing invariant must not leave evidence.json on disk.
+        let dir = std::env::temp_dir().join(format!("t9-paper-25-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret_shaped = json!({"creds": {"auth_token": "leak"}});
+        let res = std::panic::catch_unwind(|| verify_and_write(&dir, &secret_shaped));
+        assert!(res.is_err(), "secret-shaped evidence must fail the check");
+        assert!(
+            !dir.join("evidence.json").exists(),
+            "a failing invariant must not leave evidence.json on disk"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -807,8 +807,9 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                     // Overnight / session-boundary gap — expected, not a discontinuity (§D example 4).
                     // P2-141: expire prior-session pendings BEFORE resetting forming —
                     // if session-close was missed (watermark stalled) stale pendings
-                    // would otherwise emit into the new day. Emit what's complete,
-                    // count-drop what's not (never silently carry across days).
+                    // would otherwise emit into the new day. Drop them here and count
+                    // every one as a late drop (never silently carry across days; a
+                    // missed close is not an emission — XC-2).
                     // P2-152: gate + marker advance atomically via resetForming.
                     for (Timeframe tf : Timeframe.values()) {
                         int ord = tf.ordinal();
@@ -818,11 +819,14 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                             if (e.getKey() < curOpen) {
                                 CandleAccumulator pacc = e.getValue();
                                 pit.remove();
+                                // Mark so an expired window can never be re-emitted,
+                                // then count it as a drop: the emitted counter moves
+                                // only in closeAndEmit, after out.collect (XC-2).
                                 if (pacc != null && pacc.firstEventTime != Long.MAX_VALUE
                                         && !slot.emitted[ord].containsKey(e.getKey())) {
                                     slot.emitted[ord].put(e.getKey(), Boolean.TRUE);
-                                    if (emittedCounter != null) emittedCounter.inc();
-                                } else if (lateDroppedCounter != null) {
+                                }
+                                if (lateDroppedCounter != null) {
                                     lateDroppedCounter.inc();
                                 }
                             }
@@ -1386,6 +1390,14 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     int emittedSizeForTest(long token, Timeframe tf) {
         Slot s = slots.get(token);
         return s == null ? 0 : s.emitted[tf.ordinal()].size();
+    }
+
+    long emittedCountForTest() {
+        return emittedCounter == null ? -1 : emittedCounter.getCount();
+    }
+
+    long lateDroppedCountForTest() {
+        return lateDroppedCounter == null ? -1 : lateDroppedCounter.getCount();
     }
 
     long windowStartForTest(long token, Timeframe tf) {

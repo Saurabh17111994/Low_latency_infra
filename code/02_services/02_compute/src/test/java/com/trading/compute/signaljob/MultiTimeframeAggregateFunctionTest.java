@@ -616,4 +616,33 @@ class MultiTimeframeAggregateFunctionTest {
         harness.setProcessingTime(25_000L);
         assertEquals(mainsAfterFirstClose, mainRows().size(), "duplicate watermark must not re-emit same window");
     }
+
+    @Test
+    @DisplayName("XC-2: overnight expiry drops missed pendings and never counts them as emissions")
+    void overnightExpiryCountsDropsNotEmissions() throws Exception {
+        open();
+        long t1 = ist(2026, 9, 4, 15, 29, 40, 0);  // 15s window 15:29:30
+        long t2 = ist(2026, 9, 4, 15, 29, 50, 0);  // rolls it to pending (no watermark advance)
+        long t3 = ist(2026, 9, 7, 9, 15, 1, 0);    // next trading day
+        harness.processElement(trade(t1, "fp-xc2-1", 100_00L, 10L), t1);
+        harness.processElement(trade(t2, "fp-xc2-2", 101_00L, 5L), t2);
+        assertEquals(1, fn.pendingSizeForTest(TOKEN, Timeframe.FIFTEEN_S),
+                "the rolled 15s window must be held pending while no watermark advances");
+        long emittedBefore = fn.emittedCountForTest();
+        long droppedBefore = fn.lateDroppedCountForTest();
+
+        harness.processElement(trade(t3, "fp-xc2-3", 102_00L, 7L), t3);
+
+        assertEquals(0, fn.pendingSizeForTest(TOKEN, Timeframe.FIFTEEN_S),
+                "prior-session pendings must be expired");
+        assertTrue(fn.lateDroppedCountForTest() > droppedBefore,
+                "a missed-close pending must be counted as a late drop");
+        assertEquals(emittedBefore, fn.emittedCountForTest(),
+                "a dropped pending must never be counted as an emission");
+        for (RowData r : closedForTf(mainRows(), "FIFTEEN_S")) {
+            long ws = r.getLong(CandleClosedColumns.WINDOW_START);
+            assertTrue(ws >= TimeframeBucket.sessionOpenMs(t3),
+                    "no prior-session candle may be emitted into the new day");
+        }
+    }
 }
