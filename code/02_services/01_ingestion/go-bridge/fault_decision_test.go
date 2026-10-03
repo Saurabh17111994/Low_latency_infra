@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -49,6 +50,55 @@ func TestClassifyAuthRefresh(t *testing.T) {
 	// wrongly resumes.
 	if got := classifyAuthRefresh(false, 2, nil); got != authTerminalExhausted {
 		t.Fatalf("exhausted budget, nil err (P1-028): got %v, want authTerminalExhausted", got)
+	}
+}
+
+// CHG-538/AS-450: the read-loop call site must treat the FINAL allowed
+// refresh as a refresh. A success on attempt maxAuthRefreshAttempts resumes;
+// only the next (over-budget) error is terminal-exhausted. The old call site
+// derived hasRefresh from the post-increment budget and stopped the slot with
+// a false authentication_refresh_exhausted on a successful final refresh.
+func TestReadLoopAuthRefreshFinalAttemptSuccess(t *testing.T) {
+	tries, shared := 0, 0
+	ok := func(context.Context) error { return nil }
+	for attempt := 1; attempt <= maxAuthRefreshAttempts; attempt++ {
+		outcome, err := readLoopAuthRefresh(&tries, &shared, ok, context.Background())
+		if outcome != authResumed || err != nil {
+			t.Fatalf("attempt %d: got (%v, %v), want (authResumed, nil)",
+				attempt, outcome, err)
+		}
+	}
+	if tries != maxAuthRefreshAttempts || shared != maxAuthRefreshAttempts {
+		t.Fatalf("budget not synced: tries=%d shared=%d, want %d",
+			tries, shared, maxAuthRefreshAttempts)
+	}
+	outcome, err := readLoopAuthRefresh(&tries, &shared, ok, context.Background())
+	if outcome != authTerminalExhausted || err != nil {
+		t.Fatalf("over budget: got (%v, %v), want (authTerminalExhausted, nil)",
+			outcome, err)
+	}
+}
+
+// The failing-refresh sequence: attempts 1..max-1 retry, the final failing
+// attempt is terminal; the budget is shared across calls.
+func TestReadLoopAuthRefreshFailureSequence(t *testing.T) {
+	tries := 0
+	fail := func(context.Context) error { return errors.New("unauthorized") }
+	want := []authRefreshOutcome{authRetry, authRetry, authTerminal}
+	for i, w := range want {
+		outcome, err := readLoopAuthRefresh(&tries, nil, fail, context.Background())
+		if outcome != w || err == nil {
+			t.Fatalf("attempt %d: got (%v, %v), want (%v, err)", i+1, outcome, err, w)
+		}
+	}
+}
+
+// A nil refresh function (token-only deployment) is terminal-exhausted.
+func TestReadLoopAuthRefreshNilFunction(t *testing.T) {
+	tries := 0
+	outcome, err := readLoopAuthRefresh(&tries, nil, nil, context.Background())
+	if outcome != authTerminalExhausted || err != nil {
+		t.Fatalf("nil refresh: got (%v, %v), want (authTerminalExhausted, nil)", outcome, err)
 	}
 }
 

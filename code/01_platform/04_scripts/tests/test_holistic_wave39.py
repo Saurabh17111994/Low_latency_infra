@@ -151,7 +151,10 @@ class HolisticAnalyzeTest(unittest.TestCase):
         src = _src(ANALYZE)
         self.assertNotIn("v[int(len(v) * 0.95)]", src,
                          "an unsorted list indexed at 0.95*len is not a percentile")
-        self.assertIn("pct(v, 95)", src, "the module's own pct() sorts before it picks")
+        # CHG-538: the burst-slice call this used to pin was retired with the
+        # preview e2e-latency leg; pin the live G6a percentile call instead.
+        self.assertIn("pct(e2e_lat, 95)", src,
+                      "the module's own pct() sorts before it picks")
 
     def test_p6_404_a_missing_run_start_does_not_crash_the_read_storm_block(self):
         src = _src(ANALYZE)

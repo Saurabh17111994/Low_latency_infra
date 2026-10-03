@@ -902,6 +902,60 @@ class InjectLogReadTests(unittest.TestCase):
             'for ln in open(os.path.join(g7_dir, "faketool.log"))', src)
 
 
+class CheckpointReadTests(unittest.TestCase):
+    """CHG-538 (AS-025/026): corrupt or missing checkpoints.jsonl must not
+    read as a clean zero — the counter_leg_note discipline."""
+
+    def setUp(self):
+        self.mod = load_analyze()
+
+    def test_missing_file_reports_the_error(self):
+        rows, bad, err = self.mod.read_checkpoint_windows("/nonexistent/cp.jsonl")
+        self.assertEqual((rows, bad), ([], 0))
+        self.assertIsNotNone(err)
+        self.assertIn("FileNotFoundError", err)
+
+    def test_corrupt_lines_are_counted(self):
+        fh = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+        fh.write('{"trigger_ts": 1, "duration_ms": 2}\n')
+        fh.write("{not json\n")
+        fh.close()
+        self.addCleanup(os.unlink, fh.name)
+        rows, bad, err = self.mod.read_checkpoint_windows(fh.name)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(bad, 1)
+        self.assertIsNone(err)
+
+    def test_valid_file_reads_clean(self):
+        fh = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+        fh.write('{"trigger_ts": 1, "duration_ms": 2}\n')
+        fh.close()
+        self.addCleanup(os.unlink, fh.name)
+        rows, bad, err = self.mod.read_checkpoint_windows(fh.name)
+        self.assertEqual((len(rows), bad, err), (1, 0, None))
+
+
+class BurstRetirementTests(unittest.TestCase):
+    """CHG-538 (AS-371): the burst machinery is retired explicitly, not left
+    silently dead — and the checkpoint analysis runs unconditionally."""
+
+    def test_no_dead_burst_machinery_remains(self):
+        with open(ANALYZE, encoding="utf-8") as fh:
+            src = fh.read()
+        for banned in ("burst_secs", "buckets_1s", "near_bursts",
+                       "G6b: no NON-CHECKPOINT second"):
+            self.assertNotIn(banned, src)
+        self.assertIn("latency-burst detection + stall guard", src)
+        self.assertIn("burst detection retired", src)
+
+    def test_checkpoint_analysis_runs_unconditionally(self):
+        # the checkpoint section used to be nested inside `if burst_secs:`
+        with open(ANALYZE, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("read_checkpoint_windows(cp_path)", src)
+        self.assertIn("- slow checkpoints (>5s):", src)
+
+
 class TestNoDeadRetiredTableLoops(unittest.TestCase):
     """XC-10 (G11 verification): the retired preview/final-candle reads were
     replaced by `prev_rows = []` / `final_rows = []`, but their parse loops

@@ -471,11 +471,6 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 	if authRefreshes != nil {
 		authTries = *authRefreshes
 	}
-	syncAuthBudget := func() {
-		if authRefreshes != nil {
-			*authRefreshes = authTries
-		}
-	}
 	terminalAuthFailure := false
 	readCtx, stopRead := context.WithCancel(ctx)
 	defer stopRead()
@@ -551,21 +546,8 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 		func(err error) {
 			message := err.Error()
 			if isHFTAuthError(message) {
-				refreshErr := error(nil)
-				if refreshAuth != nil && authTries < maxAuthRefreshAttempts {
-					authTries++
-					syncAuthBudget()
-					refreshErr = refreshAuth(ctx)
-				}
-				// classifyAuthRefresh expects the prior count; authTries was
-				// already incremented above, so pass authTries-1.
-				// P1-028: fold an already-exhausted budget into hasRefresh=false.
-				// Otherwise no refresh runs, refreshErr stays nil, and the
-				// classifier reads (true, n, nil) as authResumed — a bogus
-				// authentication_refreshed event plus a retry that never
-				// refreshes, looping forever (the shared budget persists across
-				// epochs). Exhausted now routes to authTerminalExhausted.
-				switch classifyAuthRefresh(refreshAuth != nil && authTries < maxAuthRefreshAttempts, authTries-1, refreshErr) {
+				outcome, refreshErr := readLoopAuthRefresh(&authTries, authRefreshes, refreshAuth, ctx)
+				switch outcome {
 				case authResumed:
 					noteReconnect(slot.SlotID)
 					_ = emitter.EmitEvent(BridgeEvent{Event: "reconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: "authentication_refreshed", ReceivedTsMs: time.Now().UnixMilli()})
@@ -814,6 +796,30 @@ const (
 // R-023: a nil refreshErr must NOT be treated as success when no refresh is
 // possible — a token-only deployment (refreshAuth == nil, so refreshErr stays
 // nil) previously looped "reconnect / authentication_refreshed" forever.
+// readLoopAuthRefresh classifies (and performs) a read-loop authentication
+// refresh against the shared budget. Extracted from the read-loop closure
+// (CHG-538/AS-450) so the budget arithmetic is pinned by tests: hasRefresh
+// must reflect whether a refresh ACTUALLY ran this round, not the
+// post-increment budget — the old expression classified the final allowed
+// refresh as exhausted even when it succeeded, while the dial path retries on
+// the same success.
+func readLoopAuthRefresh(authTries *int, authRefreshes *int, refreshAuth func(context.Context) error, ctx context.Context) (authRefreshOutcome, error) {
+	refreshErr := error(nil)
+	didRefresh := false
+	if refreshAuth != nil && *authTries < maxAuthRefreshAttempts {
+		*authTries++
+		if authRefreshes != nil {
+			*authRefreshes = *authTries
+		}
+		refreshErr = refreshAuth(ctx)
+		didRefresh = true
+	}
+	// classifyAuthRefresh expects the PRIOR count; authTries was already
+	// incremented above, so pass authTries-1. P1-028: an already-exhausted
+	// budget folds to didRefresh=false and routes to authTerminalExhausted.
+	return classifyAuthRefresh(didRefresh, *authTries-1, refreshErr), refreshErr
+}
+
 func classifyAuthRefresh(hasRefresh bool, authRefreshes int, refreshErr error) authRefreshOutcome {
 	if !hasRefresh || authRefreshes >= maxAuthRefreshAttempts {
 		return authTerminalExhausted
