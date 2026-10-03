@@ -166,7 +166,7 @@ REGISTRY: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
     "ARROW_INSTRUMENT_TOKENS": (r'"ARROW_INSTRUMENT_TOKENS"', ()),
     "ARROW_TICK_COUNTS": (r'"ARROW_TICK_COUNTS"', ("default 60",)),
-    "GO_ARROW_SDK_VERSION": (r'"GO_ARROW_SDK_VERSION"', ("v0.0.0-20260622-7cce1630",)),
+    "GO_ARROW_SDK_VERSION": (r'"GO_ARROW_SDK_VERSION"', ("v0.2.0",)),
     # ---- batching / pending limits (Java-owned pins) ----
     "INGESTION_MAX_BATCH_RECORDS": (
         r'intRange\(env, "INGESTION_MAX_BATCH_RECORDS",\s*PlatformConfig\.INGESTION_MAX_BATCH_RECORDS, 1, 1000, errors\)',

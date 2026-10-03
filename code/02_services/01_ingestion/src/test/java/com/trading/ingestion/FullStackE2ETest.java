@@ -195,7 +195,7 @@ class FullStackE2ETest {
             env.put("RAW_TABLE_NAME", "raw_table_1");
             env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
             env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
-            env.put("GO_ARROW_SDK_VERSION", "v0.0.0-20260622-7cce1630");
+            env.put("GO_ARROW_SDK_VERSION", "v0.2.0");
             env.put("ARROW_HFT_CONNECTIONS", "1");
             // Count-based losslessness evidence: the bridge reports its
             // cumulative emitted-tick total every second on stderr, which the

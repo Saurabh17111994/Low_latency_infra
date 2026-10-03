@@ -345,10 +345,10 @@ public final class IngestionConfig {
         }
 
         // ---- Fingerprint & SDK version ----
-        // Pinned in versions.pin (go-arrow v0.0.0-20260622-7cce1630, tree
-        // sha256:f622f8a9...); fallback kept for dev, logged as warning.
+        // Pinned in versions.pin (go-arrow v0.2.0, tree sha256:1ea24cd6...;
+        // re-pin 20401581); fallback kept for dev, logged as warning.
         b.goArrowSdkVersion = optionalWithFallback(env, "GO_ARROW_SDK_VERSION",
-                "v0.0.0-20260622-7cce1630");
+                "v0.2.0");
 
         // ---- DDL & clock strictness ----
         b.allowRuntimeDdl = boolEnv(env, "ALLOW_RUNTIME_DDL", false, errors);
@@ -713,7 +713,7 @@ public final class IngestionConfig {
         long clockOffsetLimitMs = CLOCK_OFFSET_LIMIT_MS; // T10: 2s default
         long arrowMaxEventAgeMs;
         long arrowMaxFutureEventSkewMs;
-        String goArrowSdkVersion = "v0.0.0-20260622-7cce1630";
+        String goArrowSdkVersion = "v0.2.0";
         boolean allowRuntimeDdl;
         boolean clockCheckRequired;
         String uncertaintyJournalPath = "";

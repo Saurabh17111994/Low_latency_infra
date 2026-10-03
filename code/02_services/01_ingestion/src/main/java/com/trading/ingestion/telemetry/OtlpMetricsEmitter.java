@@ -115,7 +115,7 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
     private final AtomicLong authRefreshes = new AtomicLong(0);
     private final AtomicLong authFailures = new AtomicLong(0);
 
-    // ---- Histogram (approximate via linear buckets) ----
+    // ---- Histogram (percentiles from a 1024-sample ring, sorted; R-065/R-179) ----
     private volatile String lastMetricsJson = "";
     private final AtomicLong appendLatencyTotalMs = new AtomicLong(0);
     private final AtomicLong appendLatencyCount = new AtomicLong(0);

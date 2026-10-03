@@ -73,7 +73,7 @@ The pipe is the kernel's stdin/stdout — not a message queue, not a network hop
 | `ARROW_FEED` | No | Feed selection for the Go bridge: `token` (standard DataStream — the live channel on this account) or `hft` (the HFT stream). Case-insensitive and space-trimmed; anything else is treated as `hft` (the code default — fail-safe for a direct run). Deployment pins (2026-09-29): `docker-stack.yml` and the compose base pass `${ARROW_FEED:-token}` through, `.env.vm.example` and `day_run.py`'s effective env pin `token`; `ARROW_HFT_URL` (fake broker) still wins over the selector |
 | `ARROW_HFT_MULTI_CONNECTION_APPROVED` | No | Multi-socket approval flag (default false); rejected in `prod`; the startup preflight requires it for `ARROW_HFT_CONNECTIONS > 1` (CHG-323) |
 | `INGESTION_ALLOW_DEGRADED` | No | Degraded-mode approval flag (default false); rejected in `prod` |
-| `GO_ARROW_SDK_VERSION` | No | Pinned go-arrow SDK version tag `v0.0.0-20260622-7cce1630`; if unset the pinned version is used (warning logged) |
+| `GO_ARROW_SDK_VERSION` | No | Pinned go-arrow SDK version tag `v0.2.0`; if unset the pinned version is used (warning logged) |
 | `FLUSS_BOOTSTRAP` | Yes | Pinned environment endpoint (e.g. fluss-coordinator:9123) |
 | `RAW_TABLE_NAME` | Yes | Must equal reconciled schema manifest |
 | `INSTRUMENT_MANIFEST_PATH` | Yes | Path to the approved instrument-manifest CSV; the manifest version is a loader parameter (default 1) |

@@ -12,7 +12,7 @@
 #     never clobbered
 #
 # Validation produces an evidence record (EvidenceRecord shape, foundation
-# docs/08_implementation/01-foundation.md L159) under logs/audit-r2/:
+# docs/08_implementation/01-foundation.md L301) under logs/audit-r2/:
 #   - connectivity / bucket existence / versioning / lifecycle
 #   - S3 Object Lock API probe: R2 returns ObjectLockConfigurationNotFoundError
 #     (no S3-style lock config). R2's WORM-equivalent is "bucket locks" —
