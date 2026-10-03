@@ -226,6 +226,33 @@ def counter_leg_note(path, label, wanted, error=None):
     return None
 
 
+def read_inject_counts(path):
+    """INJECT counts from faketool.log, plus a read-error note (CHG-537).
+
+    Returns (want_dups, want_late, error). A missing log is the expected
+    injection-less run (parity-only by design, CHG-198): (0, 0, None). Any
+    OTHER OSError (permission, I/O, is-a-directory) must not masquerade as
+    "no injection configured" — the leg was not measured and surfaces as an
+    UNAVAILABLE note carrying the error (same discipline as XC-5's
+    counter_leg_note; the old broad `except OSError: pass` silently turned
+    G7a/G7b off for a run that may well have injected).
+    """
+    want_dups = want_late = 0
+    try:
+        with open(path) as fh:
+            for ln in fh:
+                m = re.search(
+                    r"INJECT round=\d+ token=\d+ dups=(\d+) late=(\d+)", ln)
+                if m:
+                    want_dups += int(m.group(1))
+                    want_late += int(m.group(2))
+    except FileNotFoundError:
+        return 0, 0, None
+    except OSError as exc:
+        return 0, 0, f"{type(exc).__name__}: {exc}"
+    return want_dups, want_late, None
+
+
 def g7c_compare(win_ticks, win_vol, final_by_key, run_start, run_end,
                 event_horizon=None, stats=None):
     """G7c: per (token, 15s window) final-candle vs raw-recount parity.
@@ -1562,15 +1589,8 @@ def main():
     #                ticks - zero loss, no over-drop, no double-count.
     print("\n### G7 data-quality audit (dedup / late-drop / tick-set parity)")
     g7_dir = os.path.join(out_dir, "main")
-    want_dups = want_late = 0
-    try:
-        for ln in open(os.path.join(g7_dir, "faketool.log")):
-            m = re.search(r"INJECT round=\d+ token=\d+ dups=(\d+) late=(\d+)", ln)
-            if m:
-                want_dups += int(m.group(1))
-                want_late += int(m.group(2))
-    except OSError:
-        pass
+    want_dups, want_late, inject_read_error = read_inject_counts(
+        os.path.join(g7_dir, "faketool.log"))
     # Parity-only mode (TM-kill drill, 2026-08-31): without deliberate
     # injection there are no counter-equality assertions to make (G7a/G7b
     # compare counters against KNOWN injected counts), but the G7c full raw
@@ -1580,10 +1600,21 @@ def main():
     # assertions still apply: dup_extras == 0 and late_rows == 0 below.
     parity_only = want_dups == 0 and want_late == 0
     if parity_only:
-        print("- G7: no injection configured (no INJECT lines) - PARITY-ONLY "
-              "audit: full raw recount vs final candles (G7c) + clean-feed "
-              "assertion (zero repeated fingerprints, zero late rows). "
-              "Counter exactness (G7a/G7b) stays injection-gated by design.")
+        if inject_read_error:
+            unavailable.append(
+                f"G7 injection log: faketool.log unreadable "
+                f"({inject_read_error}) — the INJECT counts are unknown, so "
+                f"G7a/G7b could not run; parity-only checks (G7c + clean "
+                f"feed) still ran")
+            print("- G7: faketool.log UNREADABLE "
+                  f"({inject_read_error}) — INJECT counts unknown; G7a/G7b "
+                  "skipped as UNAVAILABLE, parity-only audit (G7c + "
+                  "clean-feed) continues.")
+        else:
+            print("- G7: no injection configured (no INJECT lines) - PARITY-ONLY "
+                  "audit: full raw recount vs final candles (G7c) + clean-feed "
+                  "assertion (zero repeated fingerprints, zero late rows). "
+                  "Counter exactness (G7a/G7b) stays injection-gated by design.")
         dup_delta = late_delta = 0.0
         dup_in_window = late_in_window = 0
     if not parity_only:

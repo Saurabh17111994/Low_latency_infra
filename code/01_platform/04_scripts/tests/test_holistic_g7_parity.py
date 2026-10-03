@@ -862,6 +862,46 @@ class CounterLegNoteTests(unittest.TestCase):
         self.assertIn("PermissionError(13)", note)
 
 
+class InjectLogReadTests(unittest.TestCase):
+    """CHG-537 (blind-audit correction of AS-035): an unreadable faketool.log
+    must not masquerade as an injection-less parity-only run. Only a MISSING
+    log is the expected parity-only case; any other OSError is an unmeasured
+    leg and must surface with its error."""
+
+    def setUp(self):
+        self.mod = load_analyze()
+
+    def test_missing_log_is_the_expected_injectionless_run(self):
+        self.assertEqual(
+            self.mod.read_inject_counts("/nonexistent/faketool.log"),
+            (0, 0, None))
+
+    def test_unreadable_log_carries_the_error(self):
+        # a directory raises IsADirectoryError (an OSError subclass) on open
+        with tempfile.TemporaryDirectory() as d:
+            want_dups, want_late, error = self.mod.read_inject_counts(d)
+        self.assertEqual((want_dups, want_late), (0, 0))
+        self.assertIsNotNone(error)
+        self.assertIn("IsADirectoryError", error)
+
+    def test_inject_lines_are_summed(self):
+        fh = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
+        fh.write("noise\n")
+        fh.write("INJECT round=1 token=7 dups=3 late=2\n")
+        fh.write("INJECT round=2 token=7 dups=4 late=0\n")
+        fh.close()
+        self.addCleanup(os.unlink, fh.name)
+        self.assertEqual(self.mod.read_inject_counts(fh.name), (7, 2, None))
+
+    def test_main_uses_the_error_carrying_reader(self):
+        with open(ANALYZE, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("read_inject_counts(", src)
+        # the old direct read + broad swallow around faketool.log is gone
+        self.assertNotIn(
+            'for ln in open(os.path.join(g7_dir, "faketool.log"))', src)
+
+
 class TestNoDeadRetiredTableLoops(unittest.TestCase):
     """XC-10 (G11 verification): the retired preview/final-candle reads were
     replaced by `prev_rows = []` / `final_rows = []`, but their parse loops
