@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.LongAdder;
  * </ul>
  *
  * <p>Thread-safety: {@link ConcurrentHashMap} — called from the bridge reader
- * thread (NDJSON + proto paths may alternate after a restart).
+ * thread (proto path only; the NDJSON pipe transport was removed 2026-08-29).
  */
 public final class SequenceGapMonitor {
 

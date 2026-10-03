@@ -213,7 +213,8 @@ public final class IngestionConfig {
             errors.add("ARROW_USER_ID+PASSWORD+TOTP_KEY must be set (ARROW_TOKEN removed 2026-08-24, TOTP only)");
         }
 
-        // ---- Arrow feed (HFT only — the Standard feed was removed 2026-08-14) ----
+        // ---- Arrow feed (HFT-only keys; the Standard feed was removed 2026-08-14,
+        // reinstated as a selectable channel 2026-09-24 — ARROW_FEED=token|hft, DEC-039) ----
         b.arrowHftLatencyMs = intRange(env, "ARROW_HFT_LATENCY_MS", 50, 50, 60_000, errors);
         b.arrowInstrumentTokens = optional(env, "ARROW_INSTRUMENT_TOKENS");
 

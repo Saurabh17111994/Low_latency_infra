@@ -52,7 +52,7 @@ public final class VersionGate {
         return capabilityVerified;
     }
 
-    /** Convenience: fail unless every matrix entry is pinned (used by CI before building images). */
+    /** Convenience: fail unless every matrix entry is pinned (tests cover it; no CI caller wires it as of 2026-10-03). */
     public static void requireAllPinned(List<String> entries) {
         // R-182: a null list would throw a bare NPE in a safety-critical CI gate.
         if (entries == null) {

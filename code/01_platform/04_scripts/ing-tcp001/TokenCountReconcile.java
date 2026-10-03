@@ -5,23 +5,24 @@ import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.scanner.ScanRecord;
-import org.apache.fluss.client.table.scanner.batch.BatchScanner;
 import org.apache.fluss.client.table.scanner.log.LogScanner;
 import org.apache.fluss.client.table.scanner.log.ScanRecords;
 import org.apache.fluss.config.Configuration;
-import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.types.DataTypeFamily;
 import org.apache.fluss.types.RowType;
-import org.apache.fluss.utils.CloseableIterator;
 
 /**
  * ING-TCP-001 count-based losslessness: per-token row counts from the Fluss
- * sink side. raw_table_1 is lake-enabled LOG -> MUST use LogScanner
- * (subscribeFromBeginning; plain BatchScanner caps at the first segment end,
- * p3-2 finding). ingestion_quarantine is plain LOG -> BatchScanner is fine.
+ * sink side. Both tables are LOG -> MUST use the offset-paged LogScanner
+ * (subscribeFromBeginning). A BatchScanner cannot census a LOG table: the
+ * client requires a limit for it ("BatchScanner over a Log Table requires
+ * limit to be set"; verified in the pinned fluss-client 1.0.0 jar 2026-10-03),
+ * and a limited scan returns the first stored SEGMENT of a bucket, not the
+ * table. The quarantine path used the batch form until CHG-536 — every
+ * quarantine count threw instead of counting.
  *
  * Token column is resolved BY NAME from the live table schema (P6-116): the
  * index used to be hardcoded (raw_table_1 = 4), but schema v3 (db513ee0) added
@@ -58,8 +59,8 @@ public final class TokenCountReconcile {
             // hardcoded 0/1 inside the scan methods, so a slot change cannot
             // silently write the wrong total.
             long[] totals = new long[2];
-            scanLog(connection, rawTable, counts, totals, 0);
-            scanBatch(connection, quarTable, counts, totals, 1);
+            scanLog(connection, rawTable, counts, totals, 0, "RAW");
+            scanLog(connection, quarTable, counts, totals, 1, "QUAR");
             for (Map.Entry<Long, long[]> e : counts.entrySet()) {
                 System.out.printf("TOKEN %d RAW=%d QUAR=%d TOTAL=%d%n",
                         e.getKey(), e.getValue()[0], e.getValue()[1],
@@ -122,7 +123,8 @@ public final class TokenCountReconcile {
 
     /** LogScanner per-bucket full scan (lake-enabled LOG correctness). */
     private static void scanLog(Connection connection, String tableName,
-                                Map<Long, long[]> counts, long[] totals, int slot)
+                                Map<Long, long[]> counts, long[] totals, int slot,
+                                String label)
             throws Exception {
         TablePath path = TablePath.of("default", tableName);
         Table table = connection.getTable(path);
@@ -172,42 +174,11 @@ public final class TokenCountReconcile {
                             "bucket " + b + " of " + tableName
                                     + " produced no records; refusing to report a partial count");
                 }
-                System.out.println("RAW_BUCKET_" + b + "=" + bucketRows);
+                System.out.println(label + "_BUCKET_" + b + "=" + bucketRows);
                 rows += bucketRows;
             }
         }
         totals[slot] = rows;
-        System.out.println("RAW_TOTAL=" + rows);
-    }
-
-    /** BatchScanner per-bucket scan (plain LOG table). */
-    private static void scanBatch(Connection connection, String tableName,
-                                  Map<Long, long[]> counts, long[] totals, int slot)
-            throws Exception {
-        TablePath path = TablePath.of("default", tableName);
-        Table table = connection.getTable(path);
-        TableInfo info = connection.getAdmin().getTableInfo(path).join();
-        int tokenIdx = resolveTokenIndex(info.getRowType(), tableName);
-        long rows = 0;
-        for (int b = 0; b < info.getNumBuckets(); b++) {
-            TableBucket tb = new TableBucket(info.getTableId(), b);
-            long bucketRows = 0;
-            // P6-118: the scanner used to be capped at limit(1_000_000_000),
-            // so a larger table reconciled short with no error. No limit is set
-            // now: a full-table count is what this probe is for.
-            try (BatchScanner scanner =
-                         table.newScan().createBatchScanner(tb);
-                 CloseableIterator<InternalRow> it = scanner.pollBatch(Duration.ofMillis(30_000))) {
-                while (it.hasNext()) {
-                    InternalRow row = it.next();
-                    bucketRows++;
-                    countRow(row, tokenIdx, counts, slot);
-                }
-            }
-            System.out.println("QUAR_BUCKET_" + b + "=" + bucketRows);
-            rows += bucketRows;
-        }
-        totals[slot] = rows;
-        System.out.println("QUAR_TOTAL=" + rows);
+        System.out.println(label + "_TOTAL=" + rows);
     }
 }

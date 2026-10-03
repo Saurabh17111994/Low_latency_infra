@@ -51,11 +51,12 @@ public class CandleAccumulator implements Serializable {
     /**
      * Ingest wall-clock (raw {@code ingest_ts}) of the tick that set the
      * window's close ({@code lastEventTime}). Observability only (latency
-     * probe): NOT written to any output row, NOT part of any table schema,
-     * never used by candle math. It rides the accumulator through the heap
-     * chain so a sink-side monitor can report
+     * probe): never used by candle math. It is emitted on the forming/live
+     * row as {@code CandleLiveColumns.INGEST_TS} (CHG-491) and carried on the
+     * heap chain so the strategy host can report
      * {@code output_now - lastIngestTs} = age of the newest tick that formed
-     * the candle.
+     * the candle. (Pre-CHG-491 wording said "NOT written to any output row" —
+     * that stopped being true when the KPI probe landed.)
      *
      * <p>Unset sentinel: no close-setting tick with a non-null ingest_ts seen
      * yet. Monitors must treat this as unknown, not 1970.

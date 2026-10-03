@@ -38,6 +38,27 @@ for f in "$PROBE" "$RAW_DDL" "$QUAR_DDL"; do
 	fi
 done
 
+# ── CHG-536: a LOG table cannot be censused with BatchScanner ────────────────
+# The pinned client rejects a null limit for a LOG table ("BatchScanner over a
+# Log Table requires limit to be set", verified in the 1.0.0 jar) and a
+# limited scan reads only a bucket segment — so both tables must go through
+# the offset-paged LogScanner.
+if grep -q "createBatchScanner" "$PROBE"; then
+	bad "the probe still uses createBatchScanner (a LOG table cannot be censused that way)"
+else
+	ok "no BatchScanner path: both tables are read with LogScanner"
+fi
+if [ "$(grep -c 'scanLog(connection' "$PROBE")" -eq 2 ]; then
+	ok "raw and quarantine both go through scanLog"
+else
+	bad "expected both tables to call scanLog (found $(grep -c 'scanLog(connection' "$PROBE"))"
+fi
+if grep -q "BatchScanner is fine" "$PROBE"; then
+	bad "the class doc still claims the quarantine LOG table is fine with BatchScanner"
+else
+	ok "class doc no longer claims a batch path for LOG tables"
+fi
+
 # ── Locate the Fluss client jars ─────────────────────────────────────────────
 M2="${M2_REPO:-$HOME/.m2/repository}"
 CLIENT_JAR="$(find "$M2/org/apache/fluss/fluss-client" -name 'fluss-client-*.jar' 2>/dev/null | head -1)"
@@ -207,9 +228,9 @@ fi
 # ── Truncation cap must be gone (P6-118) ────────────────────────────────────
 echo "=== full-table scan is not capped (P6-118) ==="
 if printf '%s\n' "$PROBE_CODE" | grep -q 'limit(1_000_000_000)'; then
-	bad "BatchScanner is still capped at 1e9 rows — counts can silently truncate"
+	bad "a 1e9-row cap is back — counts can silently truncate"
 else
-	ok "BatchScanner has no row cap"
+	ok "no 1e9-row cap (the LOG scans are offset-paged and uncapped)"
 fi
 
 # ── Slot parameter is honoured (P6-426, P6-427) ─────────────────────────────

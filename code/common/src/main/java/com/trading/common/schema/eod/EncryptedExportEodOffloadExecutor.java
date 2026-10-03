@@ -17,9 +17,11 @@ import java.util.function.ToLongFunction;
 /**
  * The encrypted offload half: envelope-encrypts a trading day's source data
  * into an immutable, key-versioned export bundle on the staging target and
- * verifies it by re-opening. Replaces the fail-closed
+ * verifies it by re-opening. Intended to replace the fail-closed
  * {@link NotConfiguredEodOffloadExecutor} / {@link MockEodOffloadExecutor}
- * when a master key is configured.
+ * once a master key is wired. (Wiring note 2026-10-03: EodControllerTool's
+ * {@code --offload} list is none|mock|lake — there is no encrypted branch
+ * yet, so this class is exercised by its test only.)
  *
  * <p><b>Pipeline</b> (per record): {@link BundleSource#read} acquires the
  * source payload (the Fluss reader is the documented integration — the

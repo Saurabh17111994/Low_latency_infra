@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.PriorityQueue;
 import java.util.SplittableRandom;
 
-/** Deterministic, per-instrument variable-arrival workload used by benchmarks. */
+/** Deterministic, per-instrument variable-arrival workload used by the mock arrow server. */
 public final class SyntheticWorkload {
     public enum Profile { BASELINE, PEAK }
 
