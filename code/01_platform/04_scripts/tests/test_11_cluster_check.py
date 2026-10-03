@@ -377,3 +377,59 @@ def test_a_cluster_that_answers_nothing_is_a_single_reachability_failure():
 
 def test_self_check_passes():
     assert cc.main(["--self-check"]) == 0
+
+
+def test_an_unreadable_service_spec_fails_closed():
+    """XC-3: an inspect we could not read must not read as "no ports, no constraints".
+
+    FixtureRunner returns rc 0, so this is the parse-failure half of the
+    probe; the daemon error text is what a failed inspect really prints.
+    """
+    fixture = _fixture(
+        [{"Name": "prod_node-exporter", "Replicas": "1/1"}],
+        {"prod_node-exporter": [_task("prod_node-exporter.1", "m1")]},
+        {"prod_node-exporter": _global_spec(["node.labels.observability == true"])},
+    )
+    fixture["service inspect prod_node-exporter"] = "Error response from daemon: rpc error"
+    report = cc.ClusterReport()
+    cc.run_checks(cc.collect(cc.FixtureRunner(fixture)), report)
+    failures = {n for n, _ in report.failures}
+    assert "probes-readable" in failures, failures
+
+
+class _InspectFailer(cc.FixtureRunner):
+    """A runner whose one inspect command times out (rc != 0)."""
+
+    def __init__(self, fixture, fail_prefix):
+        super().__init__(fixture)
+        self.fail_prefix = fail_prefix
+
+    def run(self, args):
+        key = " ".join(args)
+        if key.startswith(self.fail_prefix):
+            return 1, "runner error: timed out"
+        return super().run(args)
+
+
+def test_a_timed_out_node_inspect_fails_closed():
+    fixture = _fixture(
+        [{"Name": "prod_node-exporter", "Replicas": "1/1"}],
+        {"prod_node-exporter": [_task("prod_node-exporter.1", "m1")]},
+        {"prod_node-exporter": _global_spec(["node.labels.observability == true"])},
+    )
+    report = cc.ClusterReport()
+    cc.run_checks(cc.collect(_InspectFailer(fixture, "node inspect m2")), report)
+    failures = {n for n, _ in report.failures}
+    assert "probes-readable" in failures, failures
+
+
+def test_readable_surfaces_pass_the_probe_check():
+    fixture = _fixture(
+        [{"Name": "prod_node-exporter", "Replicas": "1/1"}],
+        {"prod_node-exporter": [_task("prod_node-exporter.1", "m1")]},
+        {"prod_node-exporter": _global_spec(["node.labels.observability == true"])},
+    )
+    report = cc.ClusterReport()
+    cc.run_checks(cc.collect(cc.FixtureRunner(fixture)), report)
+    checks = {c["name"]: c["status"] for c in report.checks}
+    assert checks["probes-readable"] == "PASS"

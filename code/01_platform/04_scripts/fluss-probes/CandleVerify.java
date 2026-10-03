@@ -132,9 +132,13 @@ public class CandleVerify {
                         a.sumLastQtyAll += row.isNullAt(lastQtyIdx) ? 0L : row.getLong(lastQtyIdx);
                         { long px = row.isNullAt(priceIdx) ? -1L : row.getLong(priceIdx);
                         if ("TRADE".equals(type)) {
-                          if (px > 0) { if (px < a.minPrice) a.minPrice = px; if (px > a.maxPrice) a.maxPrice = px; } }
+                          if (px > 0) { if (px < a.minPrice) a.minPrice = px; if (px > a.maxPrice) a.maxPrice = px; }
+                            // XC-4: these two MUST stay inside the TRADE branch — outside it
+                            // they count QUOTE rows too, skewing the parity sum and making
+                            // tradeRows>=1 always (killing the zero-trade diagnostic).
                             a.sumDeltaTrade += delta;
                             a.tradeRows++;
+                        }
                         }
                     }
                 }
@@ -206,13 +210,17 @@ public class CandleVerify {
                 long candleHigh = candle.getLong(highIdx);
                 boolean ok = candleVolume == e.getValue().sumDeltaTrade;
                 long candleLow = candle.getLong(lowIdx);
+                // XC-4: the three OHLC diagnostics describe every judged window; they
+                // used to run split across the match/mismatch branches (high only when
+                // matched, low/range only when mismatched), making the printed counts
+                // misleading. They never decide pass/fail.
+                if (candleHigh < e.getValue().maxPrice) highBias++;
+                if (candleLow > e.getValue().minPrice) lowBias++;
+                if (candleHigh - candleLow > e.getValue().maxPrice - e.getValue().minPrice) rangeWider++;
                 if (ok) {
                     matched++;
-                if (candleHigh < e.getValue().maxPrice) highBias++;
                 } else {
-                if (candleLow > e.getValue().minPrice) lowBias++;
                     mismatched++;
-                if (candleHigh - candleLow > e.getValue().maxPrice - e.getValue().minPrice) rangeWider++;
                 }
                 if (judged <= 12 || !ok) {
                     System.out.println("  token=" + token + " window=" + window

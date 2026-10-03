@@ -194,8 +194,16 @@ class ClusterReport:
 
 
 def collect(runner):
-    """Gather the cluster's own view. Returns parsed surfaces keyed by name."""
-    data = {"swarm": {}, "nodes": [], "services": [], "tasks": {}, "specs": {}}
+    """Gather the cluster's own view. Returns parsed surfaces keyed by name.
+
+    An inspect that fails or cannot be parsed is recorded in `probe_errors`
+    and still defaulted (so the other checks do not crash): a spec read as
+    `{}` means "no constraints, no ports", which would let a service the
+    checker never inspected pass. `check_probes_readable` fails the run on
+    any entry.
+    """
+    data = {"swarm": {}, "nodes": [], "services": [], "tasks": {}, "specs": {},
+            "probe_errors": []}
     _, out = runner.run(["info", "--format", "{{json .Swarm}}"])
     if out.startswith("{"):
         try:
@@ -207,24 +215,39 @@ def collect(runner):
         # `docker node ls` does NOT report labels — only `node inspect` does. Without
         # this every constraint (`node.labels.x == y`) evaluates against an empty label
         # set, which silently reads as "no node matches" and turns a real shortfall into
-        # a harmless-looking topology warning.
-        raw = runner.run(["node", "inspect", _text(node.get("Hostname")),
-                          "--format", "{{json .Spec.Labels}}"])[1]
-        try:
-            labels = json.loads(raw)
-        except ValueError:
-            labels = None
-        node["Labels"] = labels if isinstance(labels, dict) else {}
+        # a harmless-looking topology warning. A FAILED inspect keeps exactly that
+        # failure mode, so it is recorded in probe_errors, never defaulted silently.
+        host = _text(node.get("Hostname"))
+        rc, raw = runner.run(["node", "inspect", host,
+                              "--format", "{{json .Spec.Labels}}"])
+        labels = None
+        if rc == 0:
+            try:
+                labels = json.loads(raw)
+            except ValueError:
+                labels = None
+        if not isinstance(labels, dict):
+            data["probe_errors"].append(
+                f"node inspect {host}: {raw[:120] or 'no output'}")
+            labels = {}
+        node["Labels"] = labels
     data["services"] = _json_lines(runner.run(["service", "ls", "--format", "{{json .}}"])[1])
     for svc in data["services"]:
         name = svc.get("Name", "")
         data["tasks"][name] = _json_lines(
             runner.run(["service", "ps", name, "--format", "{{json .}}"])[1])
-        try:
-            data["specs"][name] = json.loads(
-                runner.run(["service", "inspect", name, "--format", "{{json .Spec}}"])[1])
-        except ValueError:
-            data["specs"][name] = {}
+        rc, raw = runner.run(["service", "inspect", name, "--format", "{{json .Spec}}"])
+        spec = None
+        if rc == 0:
+            try:
+                spec = json.loads(raw)
+            except ValueError:
+                spec = None
+        if not isinstance(spec, dict):
+            data["probe_errors"].append(
+                f"service inspect {name}: {raw[:120] or 'no output'}")
+            spec = {}
+        data["specs"][name] = spec
     return data
 
 
@@ -295,6 +318,23 @@ def topology_limited(data):
             limited[name] = (f"{name} {running}/{desired} (only {eligible} node(s) match its "
                              f"constraint, max {per_node or 'unlimited'} per node)")
     return limited
+
+
+def check_probes_readable(data, report):
+    """A surface the checker could not read is a FAIL, not an empty surface.
+
+    Reading a failed inspect as `{}` silently turns "unknown" into "nothing
+    to check": node constraints vanish (a real replica shortfall is
+    reclassified as topology-limited and warned about instead of failing),
+    and placement-spread / global-coverage / published-ports skip the
+    service. Same fail-closed rule as the harness fingerprint gate
+    (P6-411): evidence we never read is not a pass.
+    """
+    errors = data.get("probe_errors") or []
+    if errors:
+        report.fail("probes-readable", "; ".join(errors))
+    else:
+        report.ok("probes-readable", "every node and service spec was read")
 
 
 def check_replicas(data, report, limited):
@@ -448,6 +488,7 @@ def check_expectations(data, expect, report):
 def run_checks(data, report, expect=None):
     check_swarm_active(data, report)
     check_nodes_ready(data, report)
+    check_probes_readable(data, report)
     # Computed once: a service the topology cannot satisfy is warned about, and its
     # waiting tasks are then not counted a second time as stuck tasks.
     limited = topology_limited(data)
@@ -466,6 +507,7 @@ def build_evidence(data, report, stamp):
         "utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "nodes": [_text(n.get("Hostname")) for n in data["nodes"]],
         "services": len(data["services"]),
+        "probe_errors": data.get("probe_errors", []),
         "checks": report.checks,
         "failures": len(report.failures),
         "warnings": len(report.warnings),

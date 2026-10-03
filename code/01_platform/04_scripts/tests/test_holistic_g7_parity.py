@@ -836,5 +836,31 @@ class G7cReconcileTests(unittest.TestCase):
         self.assertIn("shortfall=0", note)
 
 
+class CounterLegNoteTests(unittest.TestCase):
+    """XC-5: a counter TSV that was never sampled must not read as a clean zero."""
+
+    def setUp(self):
+        self.mod = load_analyze()
+
+    def test_missing_file_with_wanted_events_produces_a_note(self):
+        note = self.mod.counter_leg_note("/nonexistent/counters.tsv", "G7", 1)
+        self.assertIn("missing or empty", note)
+        self.assertIn("unmeasured counter", note)
+
+    def test_missing_file_in_a_parity_only_run_is_expected(self):
+        self.assertIsNone(
+            self.mod.counter_leg_note("/nonexistent/counters.tsv", "G7", 0))
+
+    def test_a_sampled_file_produces_no_note(self):
+        path = write_tsv([(100, SERIES, 10), (115, SERIES, 50)])
+        self.addCleanup(os.unlink, path)
+        self.assertIsNone(self.mod.counter_leg_note(path, "F6", 1))
+
+    def test_the_note_carries_the_read_error(self):
+        note = self.mod.counter_leg_note(
+            "/nonexistent/counters.tsv", "G7", 1, error="PermissionError(13)")
+        self.assertIn("PermissionError(13)", note)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -201,6 +201,31 @@ def counter_deltas(path):
             for n in names}
 
 
+def tsv_sample_count(path):
+    """Non-empty, non-comment sample lines in a Prometheus-text TSV (0 when absent)."""
+    try:
+        with open(path) as fh:
+            return sum(1 for ln in fh if ln.strip() and not ln.startswith("#"))
+    except OSError:
+        return 0
+
+
+def counter_leg_note(path, label, wanted, error=None):
+    """UNAVAILABLE note when a counter TSV was never sampled, else None.
+
+    `wanted` is how many events the leg must account for (0 = parity-only
+    run, where an absent counter file is expected). A missing file
+    otherwise reads as a measured clean zero: G7a/G7b go vacuous and F6
+    prints "total=0" for a run whose sampler produced nothing (XC-5).
+    """
+    if wanted > 0 and tsv_sample_count(path) == 0:
+        detail = f" ({error})" if error else ""
+        return (f"{label}: {os.path.basename(path)} missing or empty{detail} — "
+                f"the counters were not sampled, so the counter-exactness "
+                f"checks could not run (an unmeasured counter is not a clean zero)")
+    return None
+
+
 def g7c_compare(win_ticks, win_vol, final_by_key, run_start, run_end,
                 event_horizon=None, stats=None):
     """G7c: per (token, 15s window) final-candle vs raw-recount parity.
@@ -1632,15 +1657,21 @@ def main():
     # round 6 fired after the final Prometheus sample — its frames
     # reached raw but the job's counters never saw them; the analyzer
     # originally misread that as dedup loss).
+    counter_path = os.path.join(g7_dir, "tm-prom-dedup-late.tsv")
     last_sample_ms = 0
+    counter_error = None
     try:
-        for ln in open(os.path.join(g7_dir, "tm-prom-dedup-late.tsv")):
+        for ln in open(counter_path):
             try:
                 last_sample_ms = max(last_sample_ms, int(ln.split()[0]) * 1000)
             except ValueError:
                 pass
-    except OSError:
-        pass
+    except OSError as exc:
+        counter_error = exc
+    counter_note = counter_leg_note(counter_path, "G7", want_dups + want_late,
+                                    counter_error)
+    if counter_note:
+        unavailable.append(counter_note)
     seen_offsets = set()
     fp_seen = set()
     win_ticks = defaultdict(int)         # (token, window_start) -> ticks
@@ -1778,20 +1809,28 @@ def main():
     # (the gotcha-#22 pattern: exists, invisible). Clean bench feed =>
     # every in-window delta must be 0. Non-zero = bad feed OR a
     # validation-rule regression silently quarantining real ticks.
-    f6_deltas = counter_deltas(os.path.join(g7_dir, "tm-prom-invalid.tsv"))
+    f6_path = os.path.join(g7_dir, "tm-prom-invalid.tsv")
+    f6_note = counter_leg_note(f6_path, "F6", 1)
+    f6_deltas = counter_deltas(f6_path)
     total_rej = sum(v for k, v in f6_deltas.items()
                     if "invalid_rows" in k)
     by_reason = {k.split("byReason")[-1].lstrip("_").split("{")[0]: v
                  for k, v in f6_deltas.items()
                  if "byReason" in k and v != 0}
-    print(f"- F6 raw-validation rejections: total={total_rej:.0f} "
-          f"in-window, by-reason={by_reason or 'none'}")
-    if total_rej != 0 or any(by_reason.values()):
-        failures.append(
-            f"F6: {total_rej:.0f} raw rows rejected by the validation "
-            f"gate in-window ({by_reason}) — the bench feed is clean, "
-            f"so rejections mean a validation-rule regression or a "
-            f"corrupt feed silently dropping ticks before candles")
+    if f6_note:
+        # XC-5: an unsampled counter file printed a measured-looking total=0.
+        unavailable.append(f6_note)
+        print("- F6 raw-validation rejections: NOT SAMPLED "
+              "(tm-prom-invalid.tsv missing/empty — clean-feed claim unverified)")
+    else:
+        print(f"- F6 raw-validation rejections: total={total_rej:.0f} "
+              f"in-window, by-reason={by_reason or 'none'}")
+        if total_rej != 0 or any(by_reason.values()):
+            failures.append(
+                f"F6: {total_rej:.0f} raw rows rejected by the validation "
+                f"gate in-window ({by_reason}) — the bench feed is clean, "
+                f"so rejections mean a validation-rule regression or a "
+                f"corrupt feed silently dropping ticks before candles")
     print(f"- G7c parity: {compared} fully-closed (token,window) pairs "
           f"compared candle-vs-raw, {len(mismatch)} informational mismatch(es); "
           f"tick shortfall={g7c_stats.get('shortfall', 0)} vs "
@@ -1844,6 +1883,10 @@ def main():
     if parity_failure is not None:
         print("- G7: data-quality guards NOT EVALUATED - the parity guard "
               "above names which side was unavailable")
+    elif not g7c_failure and counter_note:
+        print("- G7: tick-set parity reconciled; counter-exactness NOT "
+              "MEASURED (tm-prom-dedup-late.tsv missing/empty — see "
+              "UNAVAILABLE above)")
     elif not g7c_failure:
         print("- G7: data-quality guards passed (dedup exact, late-drop "
               "covered, tick-set parity reconciled)")

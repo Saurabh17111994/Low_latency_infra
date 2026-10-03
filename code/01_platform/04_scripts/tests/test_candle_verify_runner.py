@@ -160,5 +160,32 @@ class StubbedDocker(unittest.TestCase):
             self.assertEqual(argv[argv.index("--network") + 1], "%s_trading-net" % project)
 
 
+    def test_trade_accumulation_stays_inside_the_trade_branch(self):
+        """XC-4: `sumDeltaTrade`/`tradeRows` must sit inside `if ("TRADE"...)`.
+
+        A misplaced brace moved them outside: every row (quotes included)
+        then fed the parity sum, and `tradeRows` was never 0, killing the
+        "absent window had no trades" diagnostic. Source-level guard because
+        the probe has no JVM test harness (the runner test only compiles it).
+        """
+        probe = os.path.join(os.path.dirname(HERE), "fluss-probes", "CandleVerify.java")
+        text = open(probe, encoding="utf-8").read()
+        start = text.index('if ("TRADE".equals(type)) {')
+        depth = 0
+        end = None
+        for j in range(start, len(text)):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        self.assertIsNotNone(end, "unbalanced TRADE branch in CandleVerify.java")
+        block = text[start:end]
+        self.assertIn("a.sumDeltaTrade += delta;", block)
+        self.assertIn("a.tradeRows++;", block)
+
+
 if __name__ == "__main__":
     unittest.main()
