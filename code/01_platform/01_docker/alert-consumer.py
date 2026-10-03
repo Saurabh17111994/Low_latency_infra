@@ -35,7 +35,6 @@ import json
 import os
 import re
 import threading
-import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse

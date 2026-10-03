@@ -220,7 +220,7 @@ PROM_SIGNALS = [
      'max(flink_taskmanager_job_task_idletimemspersecond)', "max"),
     # host (node_exporter): iowait + disk busy fraction + queue depth now
     ("cpu_iowait",
-     f'avg(rate(node_cpu_seconds_total{{mode="iowait"}}[30s])) * 100', "sum"),
+     'avg(rate(node_cpu_seconds_total{mode="iowait"}[30s])) * 100', "sum"),
     ("disk_busy",
      f'rate(node_disk_io_time_seconds_total{{device="{DEFAULT_DEVICE}"}}[30s]) * 100', "max"),
     ("disk_qd_now",

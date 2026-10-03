@@ -10,7 +10,10 @@ Usage:
 Preserves header, sorts by Token column if present else row order.
 Each output is written as <prefix><i>.csv (1-indexed) and validated to sum to input rows.
 """
-import argparse, csv, pathlib, sys
+import argparse
+import csv
+import pathlib
+import sys
 
 def find_token_idx(header):
     # case-insensitive search for token-like column
@@ -30,13 +33,15 @@ def main():
     out = pathlib.Path(args.out_dir)
     chunks = [int(x) for x in args.chunks.split(",") if x.strip()]
     if not inp.is_file():
-        print(f"input not found: {inp}", file=sys.stderr); sys.exit(2)
+        print(f"input not found: {inp}", file=sys.stderr)
+        sys.exit(2)
     out.mkdir(parents=True, exist_ok=True)
     with inp.open(newline="", encoding="utf-8-sig") as f:
         r = csv.reader(f)
         header = next(r, None)
         if header is None:
-            print("empty CSV", file=sys.stderr); sys.exit(2)
+            print("empty CSV", file=sys.stderr)
+            sys.exit(2)
         rows = list(r)
     total = sum(chunks)
     if len(rows) != total:

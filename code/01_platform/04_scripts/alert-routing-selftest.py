@@ -35,6 +35,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from typing import NoReturn
 
 BASE = os.environ.get("O2_API_URL", "http://localhost:5080")
 ORG = os.environ.get("O2_ORG", "default")
@@ -47,7 +48,7 @@ POLL_BUDGET_S = 240
 POLL_INTERVAL_S = 10
 
 
-def fail(msg: str) -> "NoReturn":  # type: ignore[valid-type]
+def fail(msg: str) -> NoReturn:
     print(f"FAIL: {msg}", file=sys.stderr)
     raise SystemExit(1)
 
@@ -90,7 +91,7 @@ def consumer(path: str, method: str = "GET", body: str | None = None) -> tuple[i
         f"req=urllib.request.Request('http://127.0.0.1:9999{path}',"
         f"method='{method}'"
         + (
-            f",data=sys.argv[1].encode(),headers={{'Content-Type':'application/json'}}"
+            ",data=sys.argv[1].encode(),headers={'Content-Type':'application/json'}"
             if body
             else ""
         )
@@ -174,7 +175,7 @@ def main() -> int:
     status, resp = o2_api("alerts", "POST", body)
     if status not in (200, 201):
         fail(f"create temp alert -> {status}: {json.dumps(resp)[:300]}")
-    print(f"3. temp alert created (always-firing, silence=0)")
+    print("3. temp alert created (always-firing, silence=0)")
 
     # --- 4-5. poll the durable record ---------------------------------------
     deadline = time.monotonic() + POLL_BUDGET_S

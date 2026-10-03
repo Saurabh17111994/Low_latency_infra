@@ -32,7 +32,7 @@ MARKER_RE = re.compile(r"^\s*- \[(.)\]")
 
 def markers_in(lines: list[str]) -> list[str]:
     """Every marker character in `lines`, in order, indented or not."""
-    return [m.group(1) for m in (MARKER_RE.match(l) for l in lines) if m]
+    return [m.group(1) for m in (MARKER_RE.match(line) for line in lines) if m]
 
 
 def parse(text: str) -> tuple[list[str], dict[str, list[str]]]:
@@ -55,7 +55,7 @@ def parse(text: str) -> tuple[list[str], dict[str, list[str]]]:
 
 def table_bounds(lines: list[str]) -> tuple[int, int]:
     """First and last+1 line index of the `|`-row block after the `**Roll-up**` line."""
-    head = next((n for n, l in enumerate(lines) if l.startswith("**Roll-up**")), None)
+    head = next((n for n, line in enumerate(lines) if line.startswith("**Roll-up**")), None)
     if head is None:
         raise SystemExit("plan_tracker: no '**Roll-up**' line found")
     start = next((n for n in range(head, len(lines)) if lines[n].startswith("|")), None)

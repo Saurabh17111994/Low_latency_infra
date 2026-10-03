@@ -756,7 +756,7 @@ class Collector:
     def services(self) -> dict:
         try:
             raw = self.runner.compose(["ps", "--format", "json"], check=True)
-        except subprocess.CalledProcessError as exc:
+        except subprocess.CalledProcessError:
             return {}
         out = {}
         for line in (raw or "").splitlines():

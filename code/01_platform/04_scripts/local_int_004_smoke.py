@@ -13,7 +13,10 @@ Offline mode (default, always passes without containers) checks the static
 contracts; --live requires an execution-t3 fake stack.
 """
 from __future__ import annotations
-import argparse, json, subprocess, sys
+import argparse
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parents[3]
@@ -23,7 +26,8 @@ INSTRUMENTS = list(range(1001, 1031))  # 30 instruments; canonical=10, extended 
 
 def _compose_json(profile="execution-t3"):
     cmd = ["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env")]
-    if profile: cmd += ["--profile", profile]
+    if profile:
+        cmd += ["--profile", profile]
     cmd += ["config","--format","json"]
     return json.loads(subprocess.check_output(cmd, text=True))
 

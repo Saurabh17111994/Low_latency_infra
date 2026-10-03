@@ -1810,9 +1810,8 @@ def provision_alerts():
     # from the conditions list (column value on metrics streams). Multiple
     # conditions are ANDed (stored shape: condition.conditions.and[]); label
     # columns (e.g. task_name, instance) are first-class condition targets.
-    v2api = lambda method, body=None: api_raw(
-        method, f"{BASE}/api/v2/{ORG}/alerts", body
-    )
+    def v2api(method, body=None):
+        return api_raw(method, f"{BASE}/api/v2/{ORG}/alerts", body)
     status, existing = v2api("GET")
     # M2-3: an unreadable list is not an empty list — refuse before any POST.
     if status != 200 or not isinstance(existing, dict):

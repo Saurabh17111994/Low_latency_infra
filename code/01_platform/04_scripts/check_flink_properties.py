@@ -84,7 +84,7 @@ def extract_block(compose_text: str) -> list[str]:
                   compose_text)
     if not m:
         raise ValueError("FLINK_PROPERTIES block not found in docker-compose.yml")
-    return [l.strip() for l in m.group(1).split("\n") if l.strip()]
+    return [line.strip() for line in m.group(1).split("\n") if line.strip()]
 
 
 def parse_props(lines: list[str]) -> list[tuple[str, str]]:

@@ -863,7 +863,6 @@ def main():
     sig_rows = list(dict.fromkeys(sig_rows))
     status_counts = defaultdict(int)
     settle_by_status = defaultdict(int)
-    candle_re = re.compile(r"candle:(\d{13}):(\d{13})")
     # F4 pairing (2026-08-31): group rows by candidate_id prefix (status
     # stripped) so a TENTATIVE can be matched to its CONFIRM/CANCEL
     # partner. Orphan check runs after the loop — see below.
@@ -1308,7 +1307,6 @@ def main():
                     print("- A5 VERDICT: zero throttling (ruled out)")
                 else:
                     # which intervals throttled?
-                    thi = [(t, (snaps[t].get("throttled_usec", 0))) for t in keys]
                     th_ev = []
                     for a, b in zip(keys, keys[1:]):
                         d = snaps[b].get("throttled_usec", 0) - snaps[a].get("throttled_usec", 0)
@@ -1649,7 +1647,6 @@ def main():
     win_vol = defaultdict(int)           # (token, window_start) -> qty sum
     dup_extras = late_rows = 0
     dup_in_window = late_in_window = 0   # ingested before last counter sample
-    dup_ing_max = 0
     LATE_LAG_MS = 20000                  # > watermark(500) + lateness(5000) + margin
     # F8 (2026-08-31): per-token event-time ordering in LOG order. A
     # backward jump beyond LATE_LAG_MS cannot be accepted by the candle

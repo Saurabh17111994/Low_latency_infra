@@ -451,7 +451,7 @@ def run_ddl_check(ddl_dir: Path) -> int:
     checks.append((not retired_file.exists(),
                    "no 22_feature_candles_15s_current.sql (" + ("PRESENT" if retired_file.exists() else "absent") + ")"))
     checks.append((RETIRED_TABLE not in entries,
-                   f"no {RETIRED_TABLE} manifest entry (" + (f"PRESENT" if RETIRED_TABLE in entries else "absent") + ")"))
+                   f"no {RETIRED_TABLE} manifest entry (" + ("PRESENT" if RETIRED_TABLE in entries else "absent") + ")"))
 
     parsed: dict[str, tuple[Path, dict]] = {}
     unparsed: list[Path] = []

@@ -45,7 +45,7 @@ def read_ledger(path=None):
     try:
         with open(path, encoding="utf-8") as fh:
             return fh.read()
-    except OSError as exc:
+    except OSError:
         return None
 
 
