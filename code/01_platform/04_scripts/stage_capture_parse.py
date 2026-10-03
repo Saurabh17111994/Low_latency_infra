@@ -473,6 +473,41 @@ def b2_read_lag_report(capture_dir: str | Path,
     return "\n".join(lines)
 
 
+def _window_percentile_report(rows: list[list[str]],
+                              windows: list[tuple[int, int]],
+                              header: str, absent_msg: str) -> str:
+    """One windowed p50/p95/p99 report over parsed TSV rows.
+
+    XC-8 (G11 verification): the consumer-read and closed-read legs were
+    verbatim copies of this bucketing/percentile logic; a fix to one silently
+    left the other wrong. Both now call this single implementation.
+    """
+    if not rows:
+        return absent_msg
+    samples: dict[tuple[int, int], list[float]] = {}
+    for r in rows:
+        try:
+            epoch_ms = float(r[0])
+            lag = float(r[5])
+        except (ValueError, IndexError):
+            continue
+        for (start, end) in windows:
+            if start <= epoch_ms / 1000.0 < end:
+                samples.setdefault((start, end), []).append(lag)
+                break
+    lines = [header]
+    for (start, end) in sorted(windows):
+        xs = sorted(samples.get((start, end), []))
+        if not xs:
+            lines.append(f"{start}-{end}\t\t\t\t0")
+            continue
+        p50 = xs[len(xs) // 2]
+        p95 = xs[min(len(xs) - 1, int(len(xs) * 0.95))]
+        p99 = xs[min(len(xs) - 1, int(len(xs) * 0.99))]
+        lines.append(f"{start}-{end}\t{p50:.0f}\t{p95:.0f}\t{p99:.0f}\t{len(xs)}")
+    return "\n".join(lines)
+
+
 def b2_consumer_read_report(capture_dir: str | Path,
                             windows: list[tuple[int, int]]) -> str:
     """B2 CP9->CP10 consumer-read (plan Stage B2): per-window p50/p95 of
@@ -485,31 +520,11 @@ def b2_consumer_read_report(capture_dir: str | Path,
     """
     capture_dir = Path(capture_dir)
     rows = _parse_epoch_tsv(capture_dir / "consumer-read.tsv", 6)
-    if not rows:
-        return "CP9->CP10 consumer read: consumer-read.tsv absent (FLUSS_PROBE_CP not set for this capture)"
-    # (epoch_ms, token, window_start, output_ts, last_event_ts, staleness_ms)
-    samples: dict[tuple[int, int], list[float]] = {}
-    for r in rows:
-        try:
-            epoch_ms = float(r[0])
-            lag = float(r[5])
-        except (ValueError, IndexError):
-            continue
-        for (start, end) in windows:
-            if start <= epoch_ms / 1000.0 < end:
-                samples.setdefault((start, end), []).append(lag)
-                break
-    lines = ["window\tcp9cp10_p50_ms\tcp9cp10_p95_ms\tcp9cp10_p99_ms\tsamples"]
-    for (start, end) in sorted(windows):
-        xs = sorted(samples.get((start, end), []))
-        if not xs:
-            lines.append(f"{start}-{end}\t\t\t\t0")
-            continue
-        p50 = xs[len(xs) // 2]
-        p95 = xs[min(len(xs) - 1, int(len(xs) * 0.95))]
-        p99 = xs[min(len(xs) - 1, int(len(xs) * 0.99))]
-        lines.append(f"{start}-{end}\t{p50:.0f}\t{p95:.0f}\t{p99:.0f}\t{len(xs)}")
-    return "\n".join(lines)
+    return _window_percentile_report(
+        rows, windows,
+        "window\tcp9cp10_p50_ms\tcp9cp10_p95_ms\tcp9cp10_p99_ms\tsamples",
+        "CP9->CP10 consumer read: consumer-read.tsv absent "
+        "(FLUSS_PROBE_CP not set for this capture)")
 
 
 def b2_closed_read_report(capture_dir: str | Path,
@@ -525,31 +540,11 @@ def b2_closed_read_report(capture_dir: str | Path,
     """
     capture_dir = Path(capture_dir)
     rows = _parse_epoch_tsv(capture_dir / "closed-read.tsv", 6)
-    if not rows:
-        return ("closed-table consumer read: closed-read.tsv absent "
-                "(FLUSS_PROBE_CP not set for this capture)")
-    samples: dict[tuple[int, int], list[float]] = {}
-    for r in rows:
-        try:
-            epoch_ms = float(r[0])
-            lag = float(r[5])
-        except (ValueError, IndexError):
-            continue
-        for (start, end) in windows:
-            if start <= epoch_ms / 1000.0 < end:
-                samples.setdefault((start, end), []).append(lag)
-                break
-    lines = ["window\tclosed_p50_ms\tclosed_p95_ms\tclosed_p99_ms\tsamples"]
-    for (start, end) in sorted(windows):
-        xs = sorted(samples.get((start, end), []))
-        if not xs:
-            lines.append(f"{start}-{end}\t\t\t\t0")
-            continue
-        p50 = xs[len(xs) // 2]
-        p95 = xs[min(len(xs) - 1, int(len(xs) * 0.95))]
-        p99 = xs[min(len(xs) - 1, int(len(xs) * 0.99))]
-        lines.append(f"{start}-{end}\t{p50:.0f}\t{p95:.0f}\t{p99:.0f}\t{len(xs)}")
-    return "\n".join(lines)
+    return _window_percentile_report(
+        rows, windows,
+        "window\tclosed_p50_ms\tclosed_p95_ms\tclosed_p99_ms\tsamples",
+        "closed-table consumer read: closed-read.tsv absent "
+        "(FLUSS_PROBE_CP not set for this capture)")
 
 
 def operator_custom_report(prom_samples: list[dict],

@@ -548,7 +548,7 @@ public final class SignalJob {
             // never catches the backlog tail. Explicit passthrough
             // (TASK_MANAGER_MEMORY_MANAGED_SIZE) for embedded/local runs only;
             // unset → the deployment (flink-conf.yaml) stays authoritative.
-            // T3 G3 keeps this passthrough for E2E (2048m) but the 0.4 fraction
+            // T3 G3 keeps this passthrough for E2E (2048m) but the 0.6 fraction
             // above is the prod pin; an explicit size overrides the derived
             // managed size and must win when present.
             if (config.taskManagerMemoryManagedSize() != null) {

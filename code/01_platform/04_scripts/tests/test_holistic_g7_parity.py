@@ -862,5 +862,17 @@ class CounterLegNoteTests(unittest.TestCase):
         self.assertIn("PermissionError(13)", note)
 
 
+class TestNoDeadRetiredTableLoops(unittest.TestCase):
+    """XC-10 (G11 verification): the retired preview/final-candle reads were
+    replaced by `prev_rows = []` / `final_rows = []`, but their parse loops
+    stayed behind — unreachable code computing values that could never exist."""
+
+    def test_retired_table_parse_loops_are_gone(self):
+        with open(ANALYZE, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn("prev_rows", src)
+        self.assertNotIn("final_rows", src)
+
+
 if __name__ == "__main__":
     unittest.main()

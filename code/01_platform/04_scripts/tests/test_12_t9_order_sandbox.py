@@ -482,3 +482,19 @@ def test_intent_guard_probe_parser_rejects_summary_mismatch():
     rows, err = t9.parse_intent_probe_output("ei-1\t1790000000000\t-1\n")
     assert rows is None
     assert "SUMMARY" in err
+
+
+def test_g11_probe_dedupe_and_dead_host_transport_removed():
+    """XC-9 (G11 verification): HostTransport is dead (zero references; the
+    T8 profile never publishes a host port) and both Fluss probes carried a
+    verbatim classpath + javac prologue. The dead class stays deleted and the
+    compile path lives in exactly one shared helper."""
+    src = open(HARNESS, encoding="utf-8").read()
+    assert "class HostTransport" not in src, (
+        "dead HostTransport (zero references) must stay deleted")
+    assert src.count('shutil.which("javac")') == 1, (
+        "the javac lookup must live in one shared probe helper")
+    assert src.count("def _probe_classpath") == 1
+    assert src.count("def _ensure_probe_class") == 1
+    assert src.count("_ensure_probe_class(") == 3, (
+        "one helper definition + exactly two probe call sites")

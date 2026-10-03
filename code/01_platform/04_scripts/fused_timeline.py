@@ -228,6 +228,25 @@ PROM_SIGNALS = [
 ]
 
 
+def forward_fill(grid, by_t, agg, max_age_s=120):
+    """Forward-fill each grid point from the newest sample at or before it.
+
+    P6-401: the bound has to be `g - t`. With `t <= g` required first, the
+    old reversed bound was always true, so a metric that stopped scraping was
+    forward-filled to the grid's end. A grid point with no sample inside the
+    bound stays EMPTY — the carried value expires with the sample.
+    """
+    out = {}
+    for g in grid:
+        cand = [t for t in by_t if t <= g and (g - t) <= max_age_s]
+        if not cand:
+            continue
+        best = max(cand)
+        vals = by_t[best]
+        out[g] = sum(vals) if agg == "sum" else max(vals)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--capture", required=True)
@@ -359,20 +378,8 @@ def main():
         for _, vals in series:
             for t, v in vals:
                 by_t.setdefault(t, []).append(v)
-        last_val, last_t = None, None
-        for g in grid:
-            # newest sample at or before g
-            # P6-401: the bound has to be `g - t`. With `t <= g` required
-            # first, the old reversed bound was always true, so a metric
-            # that stopped scraping was forward-filled to the grid's end.
-            cand = [t for t in by_t if t <= g and (g - t) <= 120]
-            if cand:
-                best = max(cand)
-                vals = by_t[best]
-                last_val = sum(vals) if agg == "sum" else max(vals)
-                last_t = best
-            if last_val is not None and last_t is not None:
-                fused[g][col] = last_val
+        for g, value in forward_fill(grid, by_t, agg).items():
+            fused[g][col] = value
 
     # RocksDB signals (client-side aggregation; see RDB_SIGNALS note)
     _fetch_rdb_signals(start, end, grid, auth, fused, warnings)

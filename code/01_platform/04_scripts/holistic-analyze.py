@@ -758,36 +758,14 @@ def main():
     # preview write latency is not observable from the catalog at all. Report the
     # leg as unavailable instead of reading a dropped table — the dead read also
     # burned the reader's missing-table timeout on every drill run.
-    prev_rows = []
     unavailable.append(
         "G6: preview latency leg — feature_candles_15s_preview retired "
         "(DDL 30, 2026-09-05) and candle_features carries no landing "
         "timestamp (output_ts), so preview write latency cannot be measured")
-    # Row (v2): (token,NSE,symbol,window_start,window_end,o,h,l,c,vol,tick_count,
-    #            is_preview,output_ts,last_event_ts,ver)
-    prev_re = re.compile(
-        r"\((\d+),NSE,\d+,(\d+),(\d+),[\d.\-]+(?:,[\d.\-]+)*,\s*(true|false),(\d+),(\d+),\d+\)")
     per_key_ts = defaultdict(list)   # (token, window_start) -> [output_ts]
     buckets_1s = defaultdict(list)   # second-offset -> [e2e latency] (burst detection)
     e2e_lat = []                     # output_ts - last_event_ts per row (v2)
     last_ts_per_token = {}           # token -> newest output_ts in window
-    for ln in prev_rows:
-        m = prev_re.match(ln)
-        if not m or m.group(4) != "true":
-            continue
-        token, ws, ots, lets = m.group(1), int(m.group(2)), int(m.group(5)), int(m.group(6))
-        if run_start and not (run_start <= ots <= (run_end or ots)):
-            continue
-        per_key_ts[(token, ws)].append(ots)
-        if ots > last_ts_per_token.get(token, 0):
-            last_ts_per_token[token] = ots
-        if lets and ots >= lets:
-            # P6-402: with a zero/missing last-event-ts, `ots - lets` is an
-            # epoch-ms "latency" of decades — it then dominated the 1s p95
-            # slices and invented latency bursts. Same guard as e2e_lat.
-            buckets_1s.setdefault((ots - (run_start or ots)) // 1000,
-                                  []).append(ots - lets)
-            e2e_lat.append(ots - lets)
 
     # DEDUPE: the Fluss LogScanner re-delivers records across polls
     # (observed 2026-08-30: every preview row appeared exactly twice in a
@@ -821,33 +799,12 @@ def main():
     # computed from the catalog. Keep it fail-closed (never invent a number)
     # rather than reading a dropped table; reviving it needs a landing-timestamp
     # column or a redefined metric — its own change, falsified on a live drill.
-    final_rows = []
     unavailable.append(
         "G7c: final-candle latency leg — candle_features (DDL 35) carries "
         "window_end but no write timestamp (feature_candles_15s and its "
         "output_ts retired, DDL 03, 2026-09-05), so window-close → committed "
         "is not observable (parity IS measured, from candle_features)")
-    final_rows = list(dict.fromkeys(final_rows))  # same re-delivery dedupe
     close_lat = []
-    for ln in final_rows:
-        # DDL column order: token,exchange,symbol,window_start,window_end,
-        # o,h,l,c,v,tick_count,algo_ver,config_ver,output_ts,schema_version
-        # → output_ts is index 13 (15 fields; index 12 is config_version —
-        # a first draft used 12 and silently read 0 rows).
-        f = ln.strip("()").split(",")
-        if len(f) >= 15:
-            try:
-                ots, wend = int(f[13]), int(f[4])
-                # window_end is window_start+15000-1 style; the window
-                # CLOSE is the end boundary. Negative = row stamped before
-                # close (shouldn't happen); huge = replay of old rows.
-                lat = ots - wend
-                if run_start and not (run_start <= ots <= (run_end or ots)):
-                    continue
-                if 0 <= lat <= 60000:
-                    close_lat.append(lat)
-            except ValueError:
-                continue
     print(f"\n### Final candle path ({len(close_lat)} final candles in run window)")
     if close_lat:
         print(f"- window-close → committed (output_ts - window_end): "

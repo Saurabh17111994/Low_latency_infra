@@ -126,6 +126,45 @@ LIVE_OPTIONAL_TABLES = ("Execution_Attempts", "Fills", "Positions")
 LIVE_POLL_TIMEOUT_S = 30
 LIVE_POLL_INTERVAL_S = 2
 
+
+def _probe_classpath(cached: str | None) -> str | None:
+    """Return the cached Fluss probe classpath, loading FLUSS_CP_FILE once.
+
+    XC-9 (G11 verification): FlussLogEndProbe and FlussIntentProbe carried
+    identical copies of this loader; a fix to one silently skipped the other.
+    """
+    if cached is None:
+        try:
+            with open(FLUSS_CP_FILE, encoding="utf-8") as fh:
+                cached = fh.read().strip()
+        except OSError:
+            cached = ""
+    return cached or None
+
+
+def _ensure_probe_class(src: str, workdir: str, class_file: str,
+                        cp: str) -> str | None:
+    """Compile the probe source when its class file is missing or stale.
+
+    Returns None on success, or a `probe-unavailable: ...` reason the caller
+    returns as its BLOCKED reason. One copy shared by both probes (XC-9): the
+    javac prologue was duplicated verbatim.
+    """
+    cls = os.path.join(workdir, class_file)
+    if os.path.exists(cls) and os.path.getmtime(cls) >= os.path.getmtime(src):
+        return None
+    javac = shutil.which("javac")
+    if not javac:
+        return "probe-unavailable: javac not found on PATH"
+    try:
+        r = subprocess.run([javac, "-cp", cp, "-d", workdir, src],
+                           capture_output=True, text=True, timeout=120)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        return f"probe-unavailable: compile failed: {exc}"
+    if r.returncode != 0:
+        return f"probe-unavailable: compile failed: {r.stderr[:200]}"
+    return None
+
 # RCF x1 safe instrument (live-verified 2026-08-25) and the placement gate.
 # NOTE: the original t9paper INPUT-11 instrument BILCARE (token 762583) is
 # DELISTED / absent from Arrow's live NSE CM instrument list — the order API
@@ -344,22 +383,6 @@ def bieq_payload(instruction_id="T9-SB-0001", candidate_id="cand-T9-0001",
 class Transport:  # pragma: no cover — thin injectable boundary for tests
     def http_json(self, method, url, body=None, headers=None):
         raise NotImplementedError
-
-
-class HostTransport(Transport):
-    """Direct host urllib — only usable when the target publishes a host port
-    (the T8 profile DOES NOT: probes from the host go through the docker
-    exec/run transports below)."""
-
-    def http_json(self, method, url, body=None, headers=None):
-        import urllib.request
-        req = urllib.request.Request(url, data=body.encode() if body else None,
-                                     method=method, headers=headers or {})
-        try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                return resp.status, resp.read().decode()
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode()
 
 
 class DockerExecTransport(Transport):
@@ -612,32 +635,18 @@ class FlussLogEndProbe:
         self._cp = None
 
     def _classpath(self):
-        if self._cp is None:
-            try:
-                with open(FLUSS_CP_FILE, encoding="utf-8") as fh:
-                    self._cp = fh.read().strip()
-            except OSError:
-                self._cp = ""
-        return self._cp or None
+        self._cp = _probe_classpath(self._cp)
+        return self._cp
 
     def log_end(self, table):
         cp = self._classpath()
         if not cp:
             return None, (f"probe-unavailable: classpath missing ({FLUSS_CP_FILE}); "
                           "run `make test` to build it")
-        cls = os.path.join(self.workdir, "FlussReadLagProbe.class")
-        if not os.path.exists(cls) or os.path.getmtime(cls) < os.path.getmtime(FLUSS_PROBE_SRC):
-            javac = shutil.which("javac")
-            if not javac:
-                return None, "probe-unavailable: javac not found on PATH"
-            try:
-                r = subprocess.run([javac, "-cp", cp, "-d", self.workdir,
-                                    FLUSS_PROBE_SRC],
-                                   capture_output=True, text=True, timeout=120)
-            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-                return None, f"probe-unavailable: compile failed: {exc}"
-            if r.returncode != 0:
-                return None, f"probe-unavailable: compile failed: {r.stderr[:200]}"
+        err = _ensure_probe_class(FLUSS_PROBE_SRC, self.workdir,
+                                  "FlussReadLagProbe.class", cp)
+        if err:
+            return None, err
         try:
             p = subprocess.run(
                 ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",
@@ -705,32 +714,18 @@ class FlussIntentProbe:
         self._cp = None
 
     def _classpath(self):
-        if self._cp is None:
-            try:
-                with open(FLUSS_CP_FILE, encoding="utf-8") as fh:
-                    self._cp = fh.read().strip()
-            except OSError:
-                self._cp = ""
-        return self._cp or None
+        self._cp = _probe_classpath(self._cp)
+        return self._cp
 
     def pending(self):
         cp = self._classpath()
         if not cp:
             return None, (f"probe-unavailable: classpath missing ({FLUSS_CP_FILE}); "
                           "run `make test` to build it")
-        cls = os.path.join(self.workdir, "IntentPendingProbe.class")
-        if not os.path.exists(cls) or os.path.getmtime(cls) < os.path.getmtime(INTENT_PROBE_SRC):
-            javac = shutil.which("javac")
-            if not javac:
-                return None, "probe-unavailable: javac not found on PATH"
-            try:
-                r = subprocess.run([javac, "-cp", cp, "-d", self.workdir,
-                                    INTENT_PROBE_SRC],
-                                   capture_output=True, text=True, timeout=120)
-            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-                return None, f"probe-unavailable: compile failed: {exc}"
-            if r.returncode != 0:
-                return None, f"probe-unavailable: compile failed: {r.stderr[:200]}"
+        err = _ensure_probe_class(INTENT_PROBE_SRC, self.workdir,
+                                  "IntentPendingProbe.class", cp)
+        if err:
+            return None, err
         try:
             p = subprocess.run(
                 ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",

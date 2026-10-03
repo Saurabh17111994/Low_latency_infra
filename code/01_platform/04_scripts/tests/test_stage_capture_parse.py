@@ -271,6 +271,26 @@ def test_operator_custom_report():
         assert not any("currentWatermark" in l for l in lines), lines
 
 
+def test_b2_read_reports_share_the_window_percentile_helper(monkeypatch):
+    """XC-8 (G11 verification): consumer-read and closed-read must delegate
+    to ONE window/percentile implementation — the two verbatim copies had
+    already drifted apart only in labels and were maintained twice."""
+    import stage_capture_parse as scp
+
+    seen = []
+
+    def fake(rows, windows, header, absent):
+        seen.append((header, absent))
+        return "sentinel"
+
+    monkeypatch.setattr(scp, "_window_percentile_report", fake)
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        assert scp.b2_consumer_read_report(d, [(1000, 1030)]) == "sentinel"
+        assert scp.b2_closed_read_report(d, [(1000, 1030)]) == "sentinel"
+    assert [h.split("\t")[1] for h, _ in seen] == ["cp9cp10_p50_ms", "closed_p50_ms"]
+
+
 def test_capture_prom_filter_keeps_chain_head_compute_samples():
     """2026-09-05 regression: the capture grep filter must keep chain-head
     custom families (flink_taskmanager_job_task_operator_compute_*). The old

@@ -821,14 +821,8 @@ public final class IngestionService {
                     // and let the loop's normal shutdown run; main() exits non-zero on
                     // fatalStopReason. Never call requestFatalStop from here: it would run
                     // shutdown() on the bridge-loop thread and join itself.
-                    String fatal = "BRIDGE_CRASH: bridge exited unexpectedly "
-                            + (restartCount + 1) + " time(s) (exitCode=" + exitCode + ")";
-                    LOG.error("ingestion: {}", fatal);
-                    if (fatalStopReason.compareAndSet(null, fatal)) {
-                        health.markNotAlive();
-                        metrics.setIngestionReady(false);
-                        updateReadinessFile();
-                    }
+                    markBridgeFatal("BRIDGE_CRASH: bridge exited unexpectedly "
+                            + (restartCount + 1) + " time(s) (exitCode=" + exitCode + ")");
                     bridgeLoopDone = true;
                     break;
                 default: // NO_RESTART — normal shutdown
@@ -841,6 +835,20 @@ public final class IngestionService {
 
             } catch (Exception e) {
                 LOG.error("ingestion: bridge process error", e);
+                // P1-269/P1-270: a read/loop failure is a bridge crash, not a
+                // quiet stop. Record the fatal reason so main() exits non-zero
+                // and the container restart policy revives us — the same
+                // BRIDGE_CRASH contract as the TERMINAL exit path. A failure
+                // observed while a shutdown is already requested stays silent.
+                boolean requested = !running || shutdownStarted.get();
+                if (!requested) {
+                    // Crash contract (docs/08_implementation/03-ingestion.md): a
+                    // bridge crash writes a DROP discontinuity before the fatal
+                    // stop. The exit code is unknown here — the process may
+                    // still be alive and is reaped by shutdown().
+                    recordBridgeExit(-1, false, restartCount);
+                    markBridgeFatal("BRIDGE_CRASH: bridge loop failed: " + e);
+                }
                 break;
             }
         }
@@ -848,6 +856,23 @@ public final class IngestionService {
         LOG.info("ingestion: bridge loop ended (ticks={}, errors={}, restarts={})",
                 frameCount.get(), errorCount.get(), restartCount);
         shutdown();
+    }
+
+    /**
+     * Record a fatal bridge failure and flip readiness to not-alive/not-ready.
+     *
+     * <p>Never calls {@code requestFatalStop}: that would run {@code shutdown()}
+     * on the bridge-loop thread and join itself (H2-3). The loop breaks and
+     * {@code main()} owns the exit code, so a BRIDGE_CRASH here becomes a
+     * non-zero process exit and the container restart policy fires.
+     */
+    private void markBridgeFatal(String fatal) {
+        LOG.error("ingestion: {}", fatal);
+        if (fatalStopReason.compareAndSet(null, fatal)) {
+            health.markNotAlive();
+            metrics.setIngestionReady(false);
+            updateReadinessFile();
+        }
     }
 
     /**

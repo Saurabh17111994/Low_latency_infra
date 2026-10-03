@@ -109,8 +109,12 @@ class FusedTimelineTest(unittest.TestCase):
         src = _src(FUSED)
         self.assertNotIn("(t - g) <= 120", src,
                          "`t <= g and (t - g) <= 120` can never filter: t - g <= 0 always")
-        self.assertIn("(g - t) <= 120", src,
+        self.assertIn("def forward_fill(grid, by_t, agg, max_age_s=120)", src,
+                      "the bounded forward-fill lives in the shared helper")
+        self.assertIn("(g - t) <= max_age_s", src,
                       "a sample older than the bound must not be forward-filled")
+        self.assertIn("if not cand:", src,
+                      "no in-bound sample must leave the grid point EMPTY (XC-6)")
 
     def test_p6_738_unused_imports_are_gone(self):
         src = _src(FUSED)
@@ -133,16 +137,15 @@ class HolisticAnalyzeTest(unittest.TestCase):
         cls.an = _load(ANALYZE, "holistic_analyze_w39")
 
     def test_p6_402_a_zero_last_event_ts_is_not_a_latency_burst(self):
+        # XC-10 (G11 verification): the retired-preview parse loop this guard
+        # inspected was unreachable (`prev_rows = []`) and was deleted. The
+        # zero-last_event_ts hazard cannot exist without the loop; keep the
+        # loop from returning in the unsafe shape.
         src = _src(ANALYZE)
-        self.assertNotIn("buckets_1s.setdefault((ots - (run_start or ots)) // 1000, [])"
-                         ".append(ots - lets)", src,
-                         "ots - 0 lands the epoch value (~1.7e12 ms) in a 1s bucket")
-        guard = src.index("if lets and ots >= lets:")
-        bucket = src.index("buckets_1s.setdefault")
-        e2e = src.index("e2e_lat.append(ots - lets)")
-        self.assertTrue(guard < bucket < e2e,
-                        "the 1s bucket append must sit inside the same guard as the "
-                        "e2e_lat path, not before it")
+        self.assertNotIn("for ln in prev_rows:", src,
+                         "the retired preview parse loop must stay deleted")
+        self.assertNotIn("buckets_1s.setdefault", src,
+                         "the unguarded 1s-bucket append must not come back")
 
     def test_p6_403_p95_is_computed_by_the_percentile_helper(self):
         src = _src(ANALYZE)

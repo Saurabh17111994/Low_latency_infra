@@ -11,8 +11,13 @@ import com.trading.ingestion.quarantine.QuarantineSink;
 import com.trading.ingestion.quarantine.QuarantineWriter;
 import com.trading.ingestion.safety.SafetyHaltWriter;
 import com.trading.ingestion.safety.SafetySink;
+import com.trading.ingestion.transport.MarketDataBatch;
+import com.trading.ingestion.transport.TransportFrame;
 import com.trading.ingestion.write.FlussRowConverter;
+import com.trading.ingestion.write.ProtoFrameReader;
 import com.trading.ingestion.write.RawTickWriter;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -134,6 +139,70 @@ class BridgeCrashLoopE2ETest {
         // ---- single shutdown: exactly one journal entry ----
         List<String> journalLines = Files.readAllLines(journalPath);
         assertEquals(1, journalLines.size(), "the terminal path shuts down exactly once");
+    }
+
+    @Test
+    @DisplayName("a truncated frame after a valid frame is a bridge crash — fatal reason recorded, not a clean exit")
+    void truncatedFrameIsFatalNotCleanExit() throws Exception {
+        // One valid zero-event market batch (sniffProto delivers it), then a
+        // 1-byte partial header: ProtoFrameReader.readLoop throws
+        // EOFException("stream ended mid-header") — the P1-269 fail-loud path.
+        // The loop's catch must record a BRIDGE_CRASH fatal reason so main()
+        // exits non-zero and the container restart policy fires; before XC-7
+        // it broke out silently and the process exited 0.
+        Path frameFile = tempDir.resolve("frame.bin");
+        Files.write(frameFile, framed(TransportFrame.newBuilder()
+                .setProtocolVersion(ProtoFrameReader.PROTOCOL_VERSION)
+                .setMarketBatch(MarketDataBatch.newBuilder())
+                .build()));
+        Path bridgeScript = tempDir.resolve("truncating-bridge.sh");
+        Files.writeString(bridgeScript,
+                "#!/bin/sh\ncat '" + frameFile + "'; printf '\\001'\n");
+        Files.setPosixFilePermissions(bridgeScript,
+                EnumSet.copyOf(PosixFilePermissions.fromString("rwxr-xr-x")));
+
+        Path journalPath = tempDir.resolve("uncertainty-journal.jsonl");
+        RecordingDiscontinuitySink discontinuities = new RecordingDiscontinuitySink();
+        IngestionService service = new IngestionService(
+                "g11-truncated-frame", instruments(), new NoopConverter(),
+                buildConfig(journalPath), null, noopQuarantine(),
+                discontinuities, noopSafety());
+
+        CapturingAppender capture = attachLogCapture("g11-truncated-frame-capture");
+        try {
+            service.runWithBridge(bridgeScript.toString());
+        } finally {
+            detachLogCapture(capture);
+        }
+
+        java.lang.reflect.Field fatalField =
+                IngestionService.class.getDeclaredField("fatalStopReason");
+        fatalField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        java.util.concurrent.atomic.AtomicReference<String> fatal =
+                (java.util.concurrent.atomic.AtomicReference<String>) fatalField.get(service);
+        String reason = fatal.get();
+        assertTrue(reason != null && reason.contains("BRIDGE_CRASH"),
+                "an unexpected loop failure must record a BRIDGE_CRASH fatal "
+                        + "reason, got: " + reason);
+        String logs = String.join("\n", capture.messages);
+        assertTrue(logs.contains("bridge loop failed"),
+                "the loop failure must be logged as a bridge crash");
+        assertTrue(discontinuities.writes.stream().anyMatch(
+                        w -> w.reason == DiscontinuityWriter.Reason.DROP),
+                "the crash contract requires a DROP discontinuity");
+    }
+
+    /** 4-byte little-endian length prefix + protobuf body (wire framing). */
+    private static byte[] framed(TransportFrame frame) throws IOException {
+        byte[] body = frame.toByteArray();
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        bos.write(body.length & 0xFF);
+        bos.write((body.length >> 8) & 0xFF);
+        bos.write((body.length >> 16) & 0xFF);
+        bos.write((body.length >> 24) & 0xFF);
+        bos.write(body);
+        return bos.toByteArray();
     }
 
     // ---- fixtures ----
