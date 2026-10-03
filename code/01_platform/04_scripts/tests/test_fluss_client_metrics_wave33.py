@@ -103,6 +103,11 @@ class ForwardFillTest(MetricsCase):
         """Keys are read via max(), not by walking until a miss."""
         self.assertEqual(self.mod._at_or_before({30: 7.0, 10: 5.0, 20: 6.0}, 25), 6.0)
 
+    def test_expires_a_stopped_series(self):
+        """XC-12: a sample older than the bound must not be carried."""
+        self.assertIsNone(self.mod._at_or_before({10: 5.0}, 200))
+        self.assertEqual(self.mod._at_or_before({10: 5.0}, 120), 5.0)
+
 
 class GridPopulationTest(MetricsCase):
     """P6-369 — end to end through `main()`, the shape that actually regressed."""

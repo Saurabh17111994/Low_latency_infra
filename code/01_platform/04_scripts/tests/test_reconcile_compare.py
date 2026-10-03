@@ -196,6 +196,18 @@ class CliTests(unittest.TestCase):
                       "--sink", "total")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_fluss_minus_one_sentinel_vanishing_is_tolerated(self):
+        # XC-20: the sentinel is mode-dependent; losing it between pre and post
+        # is not a vanished token.
+        bridge = self._bridge("arrow-tick-counts: total=2 t=100:n=2\n")
+        pre = self._probe("pre.txt",
+                          "TOKEN 100 RAW=0 QUAR=0 TOTAL=0\n"
+                          "TOKEN -1 RAW=1 QUAR=0 TOTAL=1\n")
+        post = self._probe("post.txt", "TOKEN 100 RAW=2 QUAR=0 TOTAL=2\n")
+        r = self._run("--bridge", bridge, "--pre", pre, "--post", post,
+                      "--sink", "total")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_quar_mode_rejects_raw_rows(self):
         # Post-close runs expect rows in quarantine; RAW>0 is a mismatch.
         bridge = self._bridge("arrow-tick-counts: total=2 t=100:n=2\n")

@@ -34,7 +34,10 @@ ALLOWED_CLASSES = {
 # External/verification boundaries may legitimately remain TO_BE_VERIFIED
 # (not yet captured) -- that is an explicit sentinel, not a lazy tag, so
 # it is permitted here; classification stays UNKNOWN until tests pass.
-PIN_BLOCKERS = {"TO_BE_PINNED", "LATEST", "LATEST_FORWARD"}
+# XC-23: "LATEST"/"LATEST_FORWARD" were unreachable here — the
+# `"latest" in version.lower()` branch above always matches first. Only the
+# sentinel that branch cannot catch belongs in this set.
+PIN_BLOCKERS = {"TO_BE_PINNED"}
 
 
 def fail(msg: str) -> None:

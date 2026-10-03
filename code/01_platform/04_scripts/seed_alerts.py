@@ -128,10 +128,18 @@ def main() -> int:
             data = json.loads(body)
             # O2 returns {"list": [...]} or {"data": [...]}
             lst = data.get("list") or data.get("data") or data.get("alerts") or []
-            if isinstance(lst, list):
-                existing = {x.get("name"): x for x in lst if x.get("name")}
-        except Exception:
-            existing = {}
+            if not isinstance(lst, list):
+                raise ValueError(f"unexpected catalog shape: {type(lst).__name__}")
+            existing = {x.get("name"): x for x in lst if x.get("name")}
+        except (ValueError, TypeError, AttributeError) as exc:
+            # XC-14: a 200 we cannot parse is an UNKNOWN catalog, not an empty
+            # one. Treating it as empty made dry-run print "create" for every
+            # alert and a real run re-POST existing alerts as duplicates
+            # (contradicts P6-778: "the plan can be trusted").
+            print(f"exit 3: list alerts returned 200 but the body is not a "
+                  f"readable catalog ({exc}) — refusing to plan against an "
+                  "unknown catalog", file=sys.stderr)
+            return 3
     else:
         print(f"warn: list alerts failed ({status}): {body[:200]} — treating as empty", file=sys.stderr)
 

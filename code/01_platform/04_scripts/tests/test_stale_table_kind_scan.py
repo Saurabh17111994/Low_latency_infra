@@ -243,5 +243,22 @@ class SameLineAndDdlGateTests(unittest.TestCase):
         self.assertIn("[DRIFT]", out.stdout)
 
 
+class TruthFreshnessTests(unittest.TestCase):
+    def test_scanner_truth_matches_the_foundation_line(self):
+        """XC-16: the constants must equal the foundation C6 truth line, or the
+        gate goes blind/inverted (489/285/419 vs 771/564/695 was the defect)."""
+        import re
+        foundation = (pathlib.Path(__file__).resolve().parents[4]
+                      / "docs" / "08_implementation" / "01-foundation.md")
+        m = re.search(r"unit suites green (\d+)/(\d+)/(\d+)",
+                      foundation.read_text(encoding="utf-8"))
+        assert m, "foundation C6 truth line not found"
+        doc = tuple(int(x) for x in m.groups())
+        assert (s.TEST_COUNT_TRUTH["common"], s.TEST_COUNT_TRUTH["ingestion"],
+                s.TEST_COUNT_TRUTH["compute"]) == doc, (
+            f"scanner truth {s.TEST_COUNT_TRUTH} != foundation {doc}")
+        assert s.C6_TRIPLE_TRUTH == doc, (s.C6_TRIPLE_TRUTH, doc)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,15 +23,17 @@ def o2_get(path, params, auth):
     return json.loads(urllib.request.urlopen(req, timeout=30).read())
 
 
-def _at_or_before(points, g):
-    """Value at the newest sample no later than g (None if the series starts
-    after g). P6-369: an exact-key lookup drops a point whenever the payload's
+def _at_or_before(points, g, max_age_s=120):
+    """Value at the newest sample no later than g and within max_age_s (None
+    otherwise). P6-369: an exact-key lookup drops a point whenever the payload's
     timestamp is not the precise integer on the grid — the sampling step and
-    the query step need not align. Forward-fill, as fused_timeline.py does."""
+    the query step need not align. XC-12: the fill expires like
+    fused_timeline.py's bounded forward_fill — a series that stopped scraping
+    must not be carried to the grid's end."""
     # Deliberately not an early-break walk: that would depend on `points` being
     # in ascending key order, which is true of the Prometheus payload today but
     # is not this function's to assume. The dictionaries here are small.
-    cands = [t for t in points if t <= g]
+    cands = [t for t in points if t <= g and (g - t) <= max_age_s]
     return points[max(cands)] if cands else None
 
 

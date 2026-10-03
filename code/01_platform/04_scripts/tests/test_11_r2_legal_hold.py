@@ -300,3 +300,17 @@ def test_manifest_count_mismatch_names_the_field():
                         "count=3 but 2 event(s) are present")
     _expect_value_error(lambda: lh.parse_manifest(m1.replace("count=2\n", "")),
                         "manifest missing count")
+
+
+def test_multi_prefix_retrieval_requires_every_prefix():
+    """XC-13: one broken prefix fails the aggregate; unbound prefixes are named."""
+    ok, unbound = lh.retrieval_verdict({
+        "audit/": {"chain": "VALID", "chain_root": "aa"},
+        "orders/": {"chain": "BROKEN_LINK", "chain_root": "bb"},
+    })
+    assert not ok
+    ok, unbound = lh.retrieval_verdict({
+        "audit/": {"chain": "VALID", "chain_root": "aa"},
+        "orders/": {"chain": "UNVERIFIED-ROOT", "chain_root": "bb"},
+    })
+    assert ok and unbound == ["orders/"]

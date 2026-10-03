@@ -447,6 +447,43 @@ def render_evidence(d, record):
     return "\n".join(lines)
 
 
+def build_sections(d, ctx):
+    """XC-15: map the drill's evidence fields onto EVIDENCE_HEADINGS in order.
+
+    The list is positional (render_evidence pairs entry i with heading i), so
+    entry 0 is the Scenario and entry 1 the documented expectation. The pre-fix
+    list started at documented_expectation and put the fault commands at index
+    1 — every rendered file showed the expectation under "## Scenario" and the
+    fault commands under "## Documented expectation". `ctx` carries the
+    assembled drill values (env_sections, fault_rcs, fault_time, sig, gate,
+    recovery_desc, rto_s, proof_lines, verdict).
+    """
+    fault_cmds = "; ".join("%s (rc=%s)" % (" ".join(s[-2:]), rc)
+                           for s, rc in ctx["fault_rcs"])
+    return [
+        d["title"],
+        d["documented_expectation"],
+        "\n".join(ctx["env_sections"]),
+        "Fault: %s. Fault injected at %s (UTC)." % (fault_cmds, ctx["fault_time"]),
+        "\n".join(ctx["sig"]) if ctx["sig"] else "(no during-fault probe configured)",
+        ctx["gate"],
+        ctx["recovery_desc"],
+        ("RPO = 0 (no committed loss observed: 26-table manifest parity unchanged). "
+         "RTO = %s s (fault time -> all post-assertions green; bound %d s)."
+         % (ctx["rto_s"], d["bound_s"])),
+        ("No job/stream workload was running at drill time — no offsets/checkpoints/backlog "
+         "to reconcile beyond the schema manifest. The busy-path drill (jobs running under "
+         "fault) is gated on the live Flink jobs (local-compose checklist)."),
+        "None required: single-component faults; no dual-writer/duplicate state to reconcile.",
+        ctx["proof_lines"],
+        "No alert delivery expected in a dev stack with no alert config; the signal is "
+        "probe DOWN + documented recovery.",
+        "Local-dev drill by the repo owner (Saurabh); fault injection approved per drill "
+        "(--approve). No live-money/broker involvement.",
+        ctx["verdict"],
+    ]
+
+
 SUITE_BUDGET_S = 1200  # hard wall-clock cap for a whole suite
 
 
@@ -607,29 +644,12 @@ def drive(d, suite_id, approve, out_dir, verbose, deadline=None):
     recovery_desc = "; ".join("%s (rc=%s)" % (" ".join(s[-2:]), rc)
                             for s, rc in recovery_rcs) if d["recovery"] else \
         "(recovery = the restart itself; observed via post-recovery polls)"
-    record["sections"] = [
-        d["documented_expectation"],
-        "Fault: " + "; ".join("%s (rc=%s)" % (" ".join(s[-2:]), rc)
-                            for s, rc in fault_rcs) + ".",
-        "\n".join(env_sections),
-        "Fault injected at %s (UTC)." % fault_time,
-        "\n".join(sig) if sig else "(no during-fault probe configured)",
-        gate,
-        recovery_desc,
-        ("RPO = 0 (no committed loss observed: 26-table manifest parity unchanged). "
-         "RTO = %s s (fault time -> all post-assertions green; bound %d s)."
-         % (rto_s, d["bound_s"])),
-        ("No job/stream workload was running at drill time — no offsets/checkpoints/backlog "
-         "to reconcile beyond the schema manifest. The busy-path drill (jobs running under "
-         "fault) is gated on the live Flink jobs (local-compose checklist)."),
-        "None required: single-component faults; no dual-writer/duplicate state to reconcile.",
-        proof_lines,
-        "No alert delivery expected in a dev stack with no alert config; the signal is "
-        "probe DOWN + documented recovery.",
-        "Local-dev drill by the repo owner (Saurabh); fault injection approved per drill "
-        "(--approve). No live-money/broker involvement.",
-        verdict,
-    ]
+    record["sections"] = build_sections(d, {
+        "env_sections": env_sections, "fault_rcs": fault_rcs,
+        "fault_time": fault_time, "sig": sig, "gate": gate,
+        "recovery_desc": recovery_desc, "rto_s": rto_s,
+        "proof_lines": proof_lines, "verdict": verdict,
+    })
     path = os.path.join(out_dir, "%s-%s-%s.md" % (d["id"], suite_id, fault_time[:10]))
     record["path"] = os.path.relpath(path, REPO_ROOT)
     os.makedirs(out_dir, exist_ok=True)

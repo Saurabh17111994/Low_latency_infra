@@ -140,13 +140,8 @@ def _fetch_rdb_signals(start, end, grid, auth, fused, warnings):
             warnings.append(f"{col}: names matched but no points in window")
             continue
         scale = 1073741824.0 if col.endswith("_gib") else 1.0
-        last_val = None
-        for g in grid:
-            cand = [t for t in by_t if t <= g]
-            if cand:
-                last_val = by_t[max(cand)] / scale
-            if last_val is not None:
-                fused[g][col] = last_val
+        for g, value in forward_fill(grid, by_t, "max").items():
+            fused[g][col] = value / scale
 
 
 def resolve_window(args):

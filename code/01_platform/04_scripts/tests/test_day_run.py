@@ -153,6 +153,13 @@ class FakeCollector:
 # --------------------------------------------------------------------------
 
 
+class DeadConstantGuards(unittest.TestCase):
+    def test_dead_exit_and_companion_constants_removed(self):
+        """XC-21: zero references anywhere (grep-verified 2026-10-03)."""
+        for name in ("COMPANION_JOB_NAMES", "EXIT_USAGE", "EXIT_BUSY"):
+            self.assertFalse(hasattr(day_run, name), name)
+
+
 class UniverseTests(unittest.TestCase):
     def test_full_dev_contract(self):
         universe = day_run.resolve_universe("full", "dev", {"full": 2433, "approved": 1024})

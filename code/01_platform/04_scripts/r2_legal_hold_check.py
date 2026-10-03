@@ -440,6 +440,11 @@ def build_evidence(cfg, checks, run_id, utc_now):
     bucket_ok = checks.get("bucket_lock", ("PASS", ""))[0] == "PASS"
     retrieval = checks.get("retrieval", {})
     retrieval_ok = retrieval.get("chain") in ("VALID", "UNVERIFIED-ROOT")
+    # XC-13: the first prefix is the message anchor; every prefix must be valid.
+    by_prefix = checks.get("retrieval_by_prefix") or {}
+    retrieval_ok = retrieval_ok and all(
+        r.get("chain") in ("VALID", "UNVERIFIED-ROOT")
+        for r in by_prefix.values())
     chain_ok = checks.get("hash_chain", ("PASS", ""))[0] == "PASS"
     all_pass = bucket_ok and retrieval_ok and chain_ok
     return {
@@ -471,6 +476,21 @@ def build_evidence(cfg, checks, run_id, utc_now):
             "(multi-table samples carry a sample_order_note saying so)",
         ],
     }
+
+
+def retrieval_verdict(retrieval_by_prefix):
+    """XC-13: aggregate the per-prefix retrieval/chain results.
+
+    Every requested prefix must be chain-valid (VALID or UNVERIFIED-ROOT) for
+    the aggregate to pass. Returns (ok, unbound_prefixes). The pre-fix main
+    read only prefixes[0], so `audit/,orders/` could PASS while orders/ was
+    never listed, fetched, or chain-checked.
+    """
+    chains = [r["chain"] for r in retrieval_by_prefix.values()]
+    ok = all(c in ("VALID", "UNVERIFIED-ROOT") for c in chains)
+    unbound = [p for p, r in retrieval_by_prefix.items()
+               if r["chain"] == "UNVERIFIED-ROOT"]
+    return ok, unbound
 
 
 def main(argv=None):
@@ -523,16 +543,25 @@ def main(argv=None):
                     for p in args.audit_prefix.split(",")]
         checks["bucket_lock"] = check_bucket_lock(cf_cfg, prefixes)
         client = audit_r2.R2Client(cfg)
-        checks["retrieval"] = check_retrieval_and_chain(client, prefixes[0])
-        chain_ok = checks["retrieval"]["chain"] in ("VALID", "UNVERIFIED-ROOT")
+        # XC-13: retrieve and chain-check EVERY requested prefix — the pre-fix
+        # code validated only prefixes[0], so `audit/,orders/` reported PASS
+        # while orders/ manifests were never read.
+        retrieval_by_prefix = {p: check_retrieval_and_chain(client, p)
+                               for p in prefixes}
+        checks["retrieval"] = retrieval_by_prefix[prefixes[0]]
+        checks["retrieval_by_prefix"] = {
+            p: {"chain": r["chain"], "chain_root": r["chain_root"]}
+            for p, r in retrieval_by_prefix.items()
+        }
+        chain_ok, unbound = retrieval_verdict(retrieval_by_prefix)
         bound_note = ("; root NOT yet bound to DEC review hash (no _root.txt object)"
-                      if checks["retrieval"]["chain"] == "UNVERIFIED-ROOT" else "")
+                      if unbound else "")
         checks["hash_chain"] = (
             ("PASS", f"chain {checks['retrieval']['chain'][:16]}…, "
                      f"root {checks['retrieval']['chain_root'][:16]}…{bound_note}")
             if chain_ok
-            else ("FAIL", f"chain {checks['retrieval']['chain']} — immutable "
-                          "integrity broken or sample reordered")
+            else ("FAIL", f"chain(s) {', '.join(sorted({r['chain'] for r in retrieval_by_prefix.values()}))}"
+                          " — immutable integrity broken or sample reordered")
         )
     except (audit_r2.ConfigError, audit_r2.R2Error, audit_r2.UnsupportedFeature,
             ValueError) as exc:

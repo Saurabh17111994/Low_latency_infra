@@ -91,7 +91,10 @@ def main():
         d = sink_value(post.get(t, (0, 0))) - sink_value(pre.get(t, (0, 0)))
         if (d < bridge[t]) if not args.exact else (d != bridge[t]):
             bad.append((t, bridge[t], d))
-    vanished = set(pre) - set(post)
+    # XC-20: the Fluss sentinel is not a token — its presence is mode-dependent
+    # (P6-625 already excluded it from `extra`/`raw_nonzero`); it must not read
+    # as a vanished token either.
+    vanished = {t for t in set(pre) - set(post) if t != -1}
     extra = [t for t in post if t not in bridge and t != -1]
     # A RAW *increase* over the window is only unexpected when the chosen sink
     # is quarantine (post-close runs): rows already there before the window are

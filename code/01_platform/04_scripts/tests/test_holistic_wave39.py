@@ -174,6 +174,23 @@ class HolisticAnalyzeTest(unittest.TestCase):
         self.assertNotIn("ms = lambda v: v", _src(ANALYZE),
                          "defined and never referenced")
 
+    def test_xc19_collect_rows_offset_mode_accepts_the_offset_marker(self):
+        """XC-19: offset mode prints "@<offset> <row>"; the "(" filter made
+        with_offset=True always report a failed read."""
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            def fake_run(cmd, **kw):
+                if cmd[0] == "javac":
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+                return subprocess.CompletedProcess(
+                    cmd, 0, "@123 (1,2,3)\n(4,5,6)\n", "")
+
+            with mock.patch.object(self.an.subprocess, "run", fake_run):
+                rows = self.an.collect_rows(
+                    "T", "cp", out_dir, run_ms=1000, with_offset=True)
+        self.assertEqual(rows, ["@123 (1,2,3)", "(4,5,6)"])
+
     def test_p6_742_an_empty_process_rate_list_does_not_abort_the_analysis(self):
         src = _src(ANALYZE)
         self.assertIn("if ranked:\n                top = sorted(ranked, reverse=True)[0]",

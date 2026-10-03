@@ -204,7 +204,13 @@ NUMERIC_CLAIM_TYPES = (
 # DEC-038, −10/−2/−11 CHG-023, +2 forming-bar CHG-030; 2026-08-24 bump to 464/247/387,
 # 2026-08-25 CHG-100 to 466/247/387.
 # counts fire.
-TEST_COUNT_TRUTH = {"common": 489, "ingestion": 285, "compute": 419}
+# XC-16 (2026-10-03): the constants had gone stale (489/285/419 while the
+# foundation C6 truth read 771/564/695), so genuinely current counts were
+# reported stale while rows matching the old truth (e.g. the live status row
+# in 00-start-here.md) went unreported — the count-drift gate was inverted.
+# Keep these equal to docs/08_implementation/01-foundation.md's
+# "unit suites green C/I/Comp" line; TruthFreshnessTests pins that.
+TEST_COUNT_TRUTH = {"common": 771, "ingestion": 564, "compute": 695}
 TEST_COUNT_CLAIM_TYPES = (
     (
         "test-count-stale",
@@ -221,11 +227,11 @@ TEST_COUNT_CLAIM_TYPES = (
 
 # docs-audit C6 triple citations: "docs-audit C6 line N/N/N" where the three
 # counts (common/ingestion/compute) differ from the current C6 truth.
-C6_TRIPLE_TRUTH = (489, 285, 419)
+C6_TRIPLE_TRUTH = (771, 564, 695)
 
 # Current suite triples per module ("N run / 0 failures / M skips") — bare
 # N/0/M-skips claims carry no module word, so they need their own truth.
-SUITE_TRIPLE_TRUTH = {"common": (489, 0, 2), "ingestion": (285, 0, 8), "compute": (419, 0, 22)}
+SUITE_TRIPLE_TRUTH = {"common": (771, 0, 3), "ingestion": (564, 0, 8), "compute": (695, 0, 21)}
 
 # A "now/current N" count claim reads as CURRENT state regardless of any
 # nearby date marker (2026-08-18 masking class, CHG-033 follow-up): the

@@ -74,6 +74,18 @@ class SeedAlertsWave25Test(unittest.TestCase):
             return mod.main()
 
     # --- P6-538 / P6-779: the documented exit 3 ---------------------------
+    def test_unreadable_catalog_body_exits_three(self):
+        # XC-14: 200 + unparseable body is an unknown catalog, never "empty".
+        class BadCatalog(_Api):
+            def __call__(self, _base, _org, _user, _pwd, path, method="GET", body=None):
+                if path == "v2/alerts" and method == "GET":
+                    return 200, "{not json"
+                return super().__call__(_base, _org, _user, _pwd, path, method, body)
+
+        rc = self._run(alerts=ALERTS, argv=("seed", "--dry-run"), api=BadCatalog())
+        self.assertEqual(3, rc)
+        self.assertIn("unknown catalog", self.err.getvalue())
+
     def test_malformed_json_exits_three(self):
         self.assertEqual(3, self._run("{not json"))
         self.assertIn("cannot load", self.err.getvalue())

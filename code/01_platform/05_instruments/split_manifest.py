@@ -45,8 +45,14 @@ def main():
         rows = list(r)
     total = sum(chunks)
     if len(rows) != total:
-        # allow fewer chunks than rows only if user explicitly wants truncation; here we just warn
-        print(f"warn: rows={len(rows)} != sum(chunks)={total}; will chunk contiguously by order", file=sys.stderr)
+        # XC-17: a mismatch is fatal in BOTH directions. Under-supply used to
+        # warn and exit 0 after writing fewer slot files than requested (a
+        # header-only input wrote slot1.csv and stopped); over-supply failed
+        # only after the loop. The docstring promises the chunks sum to the
+        # input rows.
+        print(f"error: rows={len(rows)} != sum(chunks)={total}; refusing to "
+              "write partial slot files", file=sys.stderr)
+        sys.exit(1)
     token_idx = find_token_idx(header)
     if token_idx is not None:
         # P4-244: per-row fallback — one bad token sorts last with a warning
@@ -73,13 +79,6 @@ def main():
         offset = end
         if offset >= len(rows):
             break
-    if offset < len(rows):
-        # P4-245: dropping instruments (highest tokens, post-sort) must fail
-        # the run — a warn+exit-0 goes unnoticed downstream in per-slot lists.
-        print(f"error: {len(rows)-offset} rows unassigned after chunks "
-              f"(rows={len(rows)} != sum(chunks)={total}); refusing to drop instruments",
-              file=sys.stderr)
-        sys.exit(1)
     print(f"done: input rows={len(rows)} chunks={chunks}")
 
 if __name__ == "__main__":

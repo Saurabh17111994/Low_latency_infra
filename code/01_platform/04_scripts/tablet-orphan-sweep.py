@@ -59,8 +59,6 @@ def zk_ls(path: str) -> list[str]:
     text = (result.stdout or "") + "\n" + (result.stderr or "")
     if "Node does not exist" in text:
         return []
-    if result.returncode != 0:
-        raise RuntimeError(f"zkCli ls {path} failed: {result.stderr.strip() or result.stdout.strip()}")
     # zkCli interleaves INFO logs on both streams; the node list is the one line
     # that is exactly [...] (log lines carry a timestamp before their brackets).
     matches = re.findall(r"^\[(.*)\]\s*$", text, re.MULTILINE)

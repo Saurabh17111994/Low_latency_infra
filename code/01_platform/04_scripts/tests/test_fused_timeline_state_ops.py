@@ -39,3 +39,13 @@ def test_rdb_signals_columns_are_unique_and_complete():
     """One row per fused-timeline column; no silent duplicates."""
     cols = [col for col, _suffix, _ops in ft.RDB_SIGNALS]
     assert len(cols) == len(set(cols)) == 8, f"unexpected column set: {cols}"
+
+
+def test_rdb_forward_fill_uses_the_bounded_helper():
+    """XC-11: the RocksDB path must expire like the Prometheus path (XC-6)."""
+    src = open(os.path.join(SCRIPTS, "fused_timeline.py"), encoding="utf-8").read()
+    rdb = src.split("def _fetch_rdb_signals", 1)[1].split("\ndef ", 1)[0]
+    assert 'forward_fill(grid, by_t, "max")' in rdb, (
+        "the RocksDB fill must go through the bounded forward_fill helper")
+    assert "last_val" not in rdb, (
+        "no carried value may survive an expired sample")

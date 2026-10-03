@@ -548,7 +548,10 @@ def collect_rows(table, cp, out_dir, run_ms=30000, with_offset=False):
     # A ROW starts with '(' (Fluss Row toString). When the reader returns no
     # valid rows, treat that as a failed measurement rather than allowing
     # downstream latency guards to pass on an empty input.
-    real_rows = [ln for ln in rows if ln.startswith("(")]
+    # XC-19: offset mode prints "@<offset> <row>" (LOG_READ_SRC); accepting
+    # only "(" made with_offset=True always report a failed read.
+    real_rows = [ln for ln in rows
+                 if ln.startswith("(") or (with_offset and ln.startswith("@"))]
     if not real_rows:
         print(f"!! {table} LOG reader completed without valid rows; "
               f"diagnostics: {err_path}")

@@ -122,6 +122,8 @@ def extract_from_image(image, path_in_image, keep=False):
     try:
         rc = run(["docker", "cp", "%s:%s" % (cid, path_in_image), tmpdir])
         if rc.returncode != 0:
+            # XC-18: this return used to skip the cleanup the docstring promises.
+            shutil.rmtree(tmpdir, ignore_errors=True)
             return None, "docker cp %s failed: %s" % (path_in_image, rc.stderr.strip()[:120])
         dest = os.path.join(tmpdir, os.path.basename(path_in_image))
         if not os.path.exists(dest):

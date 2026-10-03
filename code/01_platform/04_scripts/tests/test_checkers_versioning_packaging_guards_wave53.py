@@ -306,5 +306,17 @@ class TempFileLeakTest(unittest.TestCase):
         self.assertEqual([], left, f"the module leaked temp files: {left}")
 
 
+def test_latest_variants_are_not_dead_pin_blockers():
+    """XC-23: the "latest" substring branch catches LATEST/LATEST_FORWARD
+    first; keeping them in PIN_BLOCKERS implied a second check that never ran."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("version_matrix_verify", VERIFY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert "TO_BE_PINNED" in mod.PIN_BLOCKERS
+    assert "LATEST" not in mod.PIN_BLOCKERS
+    assert "LATEST_FORWARD" not in mod.PIN_BLOCKERS
+
+
 if __name__ == "__main__":
     unittest.main()

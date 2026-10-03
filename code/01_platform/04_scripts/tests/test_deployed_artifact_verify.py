@@ -28,6 +28,33 @@ def run_tool(*args):
                           capture_output=True, text=True)
 
 
+class ExtractCleanup(unittest.TestCase):
+    def test_cp_failure_leaves_no_temp_dir(self):
+        """XC-18: the docker-cp failure path must still clean its temp dir."""
+        mod = load_module()
+        created = []
+        real_mkdtemp = mod.tempfile.mkdtemp
+
+        def tracking_mkdtemp(*a, **k):
+            d = real_mkdtemp(*a, **k)
+            created.append(d)
+            return d
+
+        def fake_run(cmd):
+            if cmd[:2] == ["docker", "create"]:
+                return subprocess.CompletedProcess(cmd, 0, "cid123\n", "")
+            return subprocess.CompletedProcess(cmd, 1, "", "boom")
+
+        with unittest.mock.patch.object(mod, "run", fake_run), \
+                unittest.mock.patch.object(mod.tempfile, "mkdtemp", tracking_mkdtemp):
+            got, err = mod.extract_from_image("img:tag", "/x/y")
+        self.assertIsNone(got)
+        self.assertIn("docker cp", err)
+        self.assertTrue(created, "the function must create a temp dir")
+        for d in created:
+            self.assertFalse(os.path.exists(d), f"leaked temp dir {d}")
+
+
 class ArgsContract(unittest.TestCase):
     def test_list_checks_needs_no_docker(self):
         r = run_tool("--list-checks")

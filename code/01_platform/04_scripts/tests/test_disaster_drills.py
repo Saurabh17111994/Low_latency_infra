@@ -53,6 +53,23 @@ def test_evidence_rendered_with_all_required_headings(tmp_path):
     # guessed at (see CHG-243, observations).
 
 
+def test_sections_map_onto_the_headings_in_order():
+    # XC-15: the positional list must start with Scenario and put the fault
+    # commands under Fault injection, not under Documented expectation.
+    d = {"title": "SCENARIO-T", "documented_expectation": "EXPECT-E", "bound_s": 5}
+    sec = dd.build_sections(d, {
+        "env_sections": ["ENV"],
+        "fault_rcs": [(["docker", "compose", "stop", "fluss"], 1)],
+        "fault_time": "2026-01-01T00:00:00Z", "sig": ["SIG"],
+        "gate": "GATE", "recovery_desc": "REC", "rto_s": 3,
+        "proof_lines": "PROOF", "verdict": "PASS"})
+    assert sec[0] == "SCENARIO-T"
+    assert sec[1] == "EXPECT-E"
+    assert sec[2] == "ENV"
+    assert sec[3].startswith("Fault: ") and "2026-01-01T00:00:00Z" in sec[3]
+    assert sec[13] == "PASS"
+
+
 def test_redact_strips_secret_shapes():
     dirty = (
         "password=Dev-o2-local!2026 AWS_SECRET_ACCESS_KEY=hunter2 "

@@ -63,7 +63,6 @@ MAX_TOKENS_PER_CONNECTION = 1024
 MAX_CONNECTIONS = 3
 EXECUTION_PROFILE = "execution-t3"
 SIGNAL_JOB_NAME = "signal-job-compute"
-COMPANION_JOB_NAMES = ("Babysitter Positions observer", "Safety-halt consumer")
 # Flink terminal states: a completed job stays in the JobManager archive (the
 # default memory job store has no REST delete) but cannot conflict with a live
 # one and cannot be canceled (PATCH cancel -> 409). The singleton checks must
@@ -105,9 +104,7 @@ MANIFEST_LOADED_RE = re.compile(r"manifest loaded \(instruments=(\d+)")
 
 EXIT_OK = 0
 EXIT_RED = 1
-EXIT_USAGE = 2
 EXIT_REFUSED = 3
-EXIT_BUSY = 4
 
 IST = ZoneInfo("Asia/Kolkata")
 
