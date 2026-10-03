@@ -298,6 +298,23 @@ class ProvisionLockTest(unittest.TestCase):
         lock_steps = [s for s in steps if s[0] == "bucket_lock"]
         self.assertIn("already present", lock_steps[0][1])
 
+    def test_malformed_lock_response_refuses_to_merge(self):
+        """A 200 without result.rules must not be read as 'no existing rules'.
+
+        cf_put_bucket_lock REPLACES the whole configuration, so merging against
+        a hidden empty default would wipe every existing bucket-lock rule
+        (AS-286).
+        """
+        for body in ({}, {"result": None}, {"result": {}}, {"result": {"rules": None}}):
+            client = FakeClient()
+            with mock.patch.object(audit_r2, "cf_get_bucket_lock", return_value=body), \
+                 mock.patch.object(audit_r2, "cf_put_bucket_lock") as put:
+                steps = audit_r2.provision(CONFIG, client, self.CF, set_lock=True)
+            put.assert_not_called()
+            lock_steps = [s for s in steps if s[0] == "bucket_lock"]
+            self.assertTrue(lock_steps[0][1].startswith(audit_r2.BUCKET_LOCK_FAILED),
+                            lock_steps[0][1])
+
     def test_set_lock_without_token_errors(self):
         with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
             fh.write("R2_ENDPOINT=https://acct.r2.cloudflarestorage.com\n"
@@ -309,6 +326,23 @@ class ProvisionLockTest(unittest.TestCase):
         finally:
             os.unlink(path)
         self.assertEqual(rc, 2)
+
+
+class BucketLockRulesTest(unittest.TestCase):
+    """bucket_lock_rules is fail-closed: a missing result.rules is an error,
+    never an empty rule list (AS-286/AS-287)."""
+
+    def test_valid_rules_pass_through(self):
+        rules = [{"id": "r1"}]
+        self.assertEqual(audit_r2.bucket_lock_rules({"result": {"rules": rules}}), rules)
+
+    def test_empty_rule_list_is_valid(self):
+        self.assertEqual(audit_r2.bucket_lock_rules({"result": {"rules": []}}), [])
+
+    def test_malformed_responses_raise(self):
+        for body in ({}, {"result": None}, {"result": {}}, {"result": {"rules": None}}, []):
+            with self.assertRaises(audit_r2.UnsupportedFeature):
+                audit_r2.bucket_lock_rules(body)
 
 
 class ValidateTest(unittest.TestCase):

@@ -246,6 +246,23 @@ def cf_get_bucket_lock(cfg):
         raise UnsupportedFeature(f"Cloudflare API bucket-lock GET failed: {exc}") from exc
 
 
+def bucket_lock_rules(body):
+    """Existing rules from a bucket-lock GET response.
+
+    Fail-closed: a missing/None/non-list result.rules raises instead of
+    defaulting to [] — cf_put_bucket_lock REPLACES the whole
+    configuration, so an empty default would wipe every existing rule,
+    and the read-only check would report a false NONE (AS-286/AS-287;
+    CHG-531).
+    """
+    result = body.get("result") if isinstance(body, dict) else None
+    if not isinstance(result, dict) or not isinstance(result.get("rules"), list):
+        raise UnsupportedFeature(
+            "Cloudflare API bucket-lock GET response has no result.rules — "
+            "refusing to treat it as 'no rules'")
+    return result["rules"]
+
+
 def cf_put_bucket_lock(cfg, rules):
     """Set the R2 bucket-lock configuration via the Cloudflare API. The PUT
     REPLACES the whole configuration, so callers MUST merge existing rules
@@ -471,7 +488,7 @@ def provision(config, client, cf_lock=None, set_lock=False, audit_prefix="audit/
     if cf_lock is not None:
         try:
             body = cf_get_bucket_lock(cf_lock)
-            rules = list(body.get("result", {}).get("rules", []) or [])
+            rules = list(bucket_lock_rules(body))
             if set_lock:
                 rule = indefinite_lock_rule(audit_prefix)
                 if rule["id"] in {r.get("id") for r in rules}:
@@ -537,7 +554,7 @@ def validate(config, client, run_id, utc_now, cf_lock=None):
     if cf_lock is not None:
         try:
             body = cf_get_bucket_lock(cf_lock)
-            rules = body.get("result", {}).get("rules", [])
+            rules = bucket_lock_rules(body)
             checks["bucket_lock"] = "PASS" if rules else "NONE"
             checks["bucket_lock_rules"] = [r.get("id") for r in rules]
             checks["bucket_lock_note"] = (

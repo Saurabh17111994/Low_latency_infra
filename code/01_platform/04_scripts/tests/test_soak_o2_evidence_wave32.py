@@ -183,6 +183,20 @@ class SoakO2EvidenceTest(unittest.TestCase):
         self.assertEqual(len(recs), 8)
         self.assertTrue(all(x["n_points"] == 0 and x["min"] is None for x in recs))
 
+    def test_error_status_is_a_failure_not_zero_series(self):
+        """A 200 with status:error (or no data object) is a query failure.
+
+        Recording it as an empty result would put a false 'zero series' row in
+        the soak evidence (AS-303)."""
+        for bad_body in (b'{"status": "error", "error": "bad_data: parse error"}',
+                         b'{"status": "success"}'):
+            r = self.run_script(queue=[(bad_body, 200, "application/json")] + self._ok(n=7))
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn("BAD PAYLOAD", r.stderr)
+            self.assertEqual(len(self.records(r)), 7,
+                             "the remaining 7 queries still produce records")
+
     # ---- P6-547: a non-JSON body is a query failure, not a crash ---------
     def test_html_error_page_does_not_abort_the_run(self) -> None:  # disc
         html = (b"<html><body>502 Bad Gateway</body></html>", 200, "text/html")

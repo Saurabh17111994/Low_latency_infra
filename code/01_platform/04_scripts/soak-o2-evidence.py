@@ -134,7 +134,15 @@ def main() -> int:
             rc = 1
             continue
         try:
-            result = payload.get("data", {}).get("result", [])
+            # A 200 is not a usable body: a Prometheus status=error or a
+            # data-less body must fail the query, not masquerade as "zero
+            # series" in the evidence (AS-303; CHG-531).
+            if (not isinstance(payload, dict) or payload.get("status") == "error"
+                    or not isinstance(payload.get("data"), dict)):
+                detail = (payload.get("error") if isinstance(payload, dict) else None) \
+                    or "malformed payload: no data.result"
+                raise ValueError(detail)
+            result = payload["data"].get("result", [])
             # One record PER SERIES: `sum by (strategy)` returns one series per
             # strategy, and reading only result[0] dropped every other series
             # from the evidence this scorecard is built from (P6-200). A
