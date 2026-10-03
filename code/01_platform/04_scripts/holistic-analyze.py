@@ -957,8 +957,8 @@ def main():
         else:
             print("\n(signal-path latency: no tm-prom-latency.tsv samples — "
                   "pre-2026-08-31 evidence dir)")
-    except OSError:
-        print("\n(signal-path latency: tm-prom-latency.tsv absent)")
+    except OSError as exc:
+        print(f"\n(signal-path latency: tm-prom-latency.tsv absent: {exc})")
 
     # ---- Burst attribution (2026-08-30): correlate latency spikes with
     # GC pauses (TM + ingestion JVM) and slow checkpoints ----
@@ -1278,8 +1278,8 @@ def main():
                 print("- A2 VERDICT: disk not saturated this run")
         else:
             print("- diskstats: no parseable samples")
-    except OSError:
-        print("- diskstats.tsv absent (A2 unavailable)")
+    except OSError as exc:
+        print(f"- diskstats.tsv absent (A2 unavailable): {exc}")
 
     # A5: cgroup cpu.stat → throttling deltas
     th_path = os.path.join(out_dir, "main", "tm-throttle.tsv")
@@ -1318,8 +1318,8 @@ def main():
                           else "- A5 VERDICT: throttling present but NOT burst-aligned")
         else:
             print("- tm-throttle.tsv: no parseable samples")
-    except OSError:
-        print("- tm-throttle.tsv absent (A5 unavailable)")
+    except OSError as exc:
+        print(f"- tm-throttle.tsv absent (A5 unavailable): {exc}")
 
     # A1: RocksDB gauges from TM Prometheus — flush events (memtable drop)
     pr_path = os.path.join(out_dir, "main", "tm-prom-rocksdb.tsv")
@@ -1369,8 +1369,8 @@ def main():
                       f"sample names: {names}")
         else:
             print("- tm-prom-rocksdb.tsv: no samples (job not stateful, or endpoint down)")
-    except OSError:
-        print("- tm-prom-rocksdb.tsv absent (A1 unavailable)")
+    except OSError as exc:
+        print(f"- tm-prom-rocksdb.tsv absent (A1 unavailable): {exc}")
 
     # ---- A2b (2026-08-30): name the disk WRITER — per-process write rates
     # (/proc/<pid>/io deltas) vs disk-saturation intervals and bursts ----
@@ -1420,8 +1420,8 @@ def main():
                       f"— {'and its spikes ALIGN with bursts' if top[6] >= max(1, top[5]//2) else 'but spikes do not align with bursts'}")
         else:
             print("- proc-io.tsv: no parseable samples")
-    except OSError:
-        print("- proc-io.tsv absent (A2b unavailable)")
+    except OSError as exc:
+        print(f"- proc-io.tsv absent (A2b unavailable): {exc}")
 
     if not cadence and not status_counts:
         print("!! no rows parsed within the run window — raw rows kept in "
@@ -1460,8 +1460,8 @@ def main():
                     f"compare with prior runs before shipping")
         else:
             print("- gc.log present but no pause lines parsed (format drift?)")
-    except OSError:
-        print("- gc.log absent (D6 guard skipped - legacy evidence dir?)")
+    except OSError as exc:
+        print(f"- gc.log absent (D6 guard skipped - legacy evidence dir?): {exc}")
 
 
     # G6a: preview e2e p95 MUST stay under 1s (REQ-FC-002 target, broker→
