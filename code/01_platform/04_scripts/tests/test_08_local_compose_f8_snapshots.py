@@ -76,6 +76,22 @@ class KvSnapshotPinsTests(unittest.TestCase):
             "the dev env template must enable the interval the snapshot "
             "mount exists for")
 
+    def test_duration_knob_defaults_are_parser_legal(self):
+        """CHG-546: `PT1M` is printed as the option's own default, but the
+        server's parser (TimeUtils.parseDuration) rejects it — "Could not parse
+        value 'PT1M' for key 'log.flush.offset.checkpoint-interval'" — and the
+        tablet then crash-loops at startup (16 restarts, exit 2, 2026-10-04).
+        Only `<number><unit>` forms (`60s`, `1m`) are legal."""
+        block = service_block(self.compose, "fluss-tablet")
+        self.assertIn(
+            "log.flush.offset.checkpoint-interval: "
+            "${FLUSS_LOG_FLUSH_OFFSET_CHECKPOINT_INTERVAL:-60s}",
+            block,
+            "the offset-checkpoint knob must keep its one-minute default")
+        self.assertEqual(
+            [], re.findall(r"\$\{[A-Z_]+:-PT[^}]*\}", block),
+            "an ISO-8601 `PT...` duration default crash-loops the tablet")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -576,6 +576,17 @@ services:
         # standby-replica promotion with snapshots on. The default keeps dev and production at the
         # certified 0s, so an unchanged environment renders exactly as before.
         kv.snapshot.interval: ${FLUSS_KV_SNAPSHOT_INTERVAL:-0s}
+        # 2026-10-04 (C2 follow-up): with kv.snapshot.interval ruled out as the
+        # cause of the ~60 s append-p99 square wave, the log's offset checkpoint
+        # is the last named candidate — it flushes FileLogRecords + indices and
+        # fsyncs the dir once per interval (upstream default PT1M) on the same
+        # single writer thread that serves appends. Parameterized for an
+        # ingestion-only A/B. Written as "60s", NOT the ISO-8601 "PT1M" that
+        # ConfigOptions prints as its own default: the config parser
+        # (TimeUtils.parseDuration) rejects "PT1M" outright and the tablet then
+        # crash-loops on startup — "Could not parse value 'PT1M' for key
+        # 'log.flush.offset.checkpoint-interval'" (CHG-546).
+        log.flush.offset.checkpoint-interval: ${FLUSS_LOG_FLUSH_OFFSET_CHECKPOINT_INTERVAL:-60s}
         data.dir: /tmp/fluss/data
         # W35x: tiered log segments go to Cloudflare R2 (same bucket/credentials
         # as the Lake warehouse). A container-local path is readable only from
