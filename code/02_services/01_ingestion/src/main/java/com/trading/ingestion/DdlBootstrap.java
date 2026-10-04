@@ -571,7 +571,15 @@ public final class DdlBootstrap {
                     Map.entry("Signal_Candidates",
                             TableDescriptor.builder().schema(SIGNAL_CANDIDATES_SCHEMA).distributedBy(16, "instrument_token").build()),
                     Map.entry("Signal_Candidates_current",
-                            TableDescriptor.builder().schema(SIGNAL_CANDIDATES_CURRENT_SCHEMA).distributedBy(16, "instrument_token").build()),
+                            TableDescriptor.builder()
+                                    .schema(SIGNAL_CANDIDATES_CURRENT_SCHEMA)
+                                    .distributedBy(16, "instrument_token")
+                                    // CHG-547: same options as the DDL (23_signal_candidates_current.sql).
+                                    // The tablet keeps the row with the greater evaluation_ts, so a delayed
+                                    // or retried out-of-order signal can no longer clobber a newer one.
+                                    .property("table.merge-engine", "versioned")
+                                    .property("table.merge-engine.versioned.ver-column", "evaluation_ts")
+                                    .build()),
                     Map.entry("Ranking_Results",
                             logTable("execution_partition_id")),
                     Map.entry("Trade_Decisions",

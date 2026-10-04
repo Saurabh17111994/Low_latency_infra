@@ -256,7 +256,7 @@
     {
       "table_name": "Signal_Candidates_current",
       "ddl_path": "23_signal_candidates_current.sql",
-      "ddl_sha256": "ee107b4037476c0fdf9df37d30be14a207bd0205a46d33a8cd43c91fa1fbdb68",
+      "ddl_sha256": "4fc83117877ee8669c780b2be183c1161073f988c92fc86cba26e9f6db570533",
       "table_kind": "KV",
       "primary_key": "instrument_token",
       "bucket_key": null,

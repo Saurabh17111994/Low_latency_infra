@@ -288,6 +288,52 @@ on a failed parity check, never merely on fence state being gone.
 
 Automatic resume and approval reuse across epochs are prohibited.
 
+## Signal_Candidates_current recreate (versioned merge engine, CHG-547)
+
+**Trigger**: adopting `table.merge-engine=versioned` on `evaluation_ts` (CHG-547) — the
+option is create-only (not in Fluss 1.0.0's ALTER allowlist), so the dev table is
+created by `DdlBootstrap` with the option and an existing table must be dropped and
+recreated. Same tool and shape as the gate recreate above; different blast radius.
+
+**Scope and severity**: planned, low-risk maintenance. Only the KV current-state is
+destroyed — the append-only LOG twin `Signal_Candidates` and the Iceberg lake are
+untouched, and every instrument's row is rebuilt by the next signal for it (no money
+is moved, no `HALTED` gate state is involved, so unlike the gate recreate no trading
+halt is required). Expect a window where `Signal_Candidates_current` has fewer rows
+than instruments; readers must not treat a missing row as "no position".
+
+**Preconditions**:
+
+- No `signal-job-compute` job is RUNNING (`GET /jobs/overview`), so no writer races
+  the drop.
+- The DDL declares the engine — `GateTableAdmin show <bootstrap> <ddl>` must print
+  `table.merge-engine = versioned` and
+  `table.merge-engine.versioned.ver-column = evaluation_ts`.
+
+**Procedure** (the DDL path is the tool's **third** argument; omitting it silently
+shows the gate DDL):
+
+1. `javac -cp "code/common/target/classes:$(cat code/02_services/01_ingestion/target/cp.txt)" -d /tmp/repair-classes code/01_platform/04_scripts/fluss-repair/GateTableAdmin.java`
+2. `java -cp "/tmp/repair-classes:$(cat code/02_services/01_ingestion/target/cp.txt)" GateTableAdmin show localhost:9123 code/01_platform/02_sql/ddl/23_signal_candidates_current.sql`
+3. `java -cp "/tmp/repair-classes:$(cat code/02_services/01_ingestion/target/cp.txt)" GateTableAdmin recreate localhost:9123 code/01_platform/02_sql/ddl/23_signal_candidates_current.sql`
+   The tool refuses to touch the cluster unless the DDL declares a versioned engine
+   with a non-blank version column.
+
+**Validation and closure evidence**:
+
+- `Admin.getTableInfo` on the recreated table lists `table.merge-engine=versioned`,
+  `table.merge-engine.versioned.ver-column=evaluation_ts`,
+  `table.delete.behavior=IGNORE` (it also gains `table.kv.value-layout-version=1`).
+- A newer row survives a later stale write:
+  `FLUSS_BOOTSTRAP=<bootstrap> mvn -o test -Dtest=SignalCandidatesCurrentMergeEngineIntegrationTest`
+  in `code/02_services/02_compute` (creates and drops its own scratch table).
+- The job's own startup contract passes: `TableContractValidator.validateSignalCurrentKvTable`
+  now fails closed on a table that is not versioned on `evaluation_ts`.
+
+**Rollback / abort criteria**: recreate with the WITH block reverted to no merge
+engine (`last-writer-wins`). Do that only for a failed validation, because rolling
+back reinstates the stale-writer clobber window.
+
 ## Unknown execution outcome
 
 1. Mark the attempt `UNKNOWN`; do not create a replacement attempt.
@@ -596,7 +642,7 @@ Trigger: DDL/version preflight blocks startup (validation/contract gate).
 
 1. Capture the failing table, expected vs actual schema, and version matrix
    state.
-2. Check the table contract fields: PK, routing, bucket count, and the full column/type/nullability set (`TableContractValidator`: `Signal_Candidates` LOG + `Signal_Candidates_current` KV PK `[instrument_token]`; `candle_features` KV PK `(instrument_token, tf, window_start)` (the merged writer; unconditional since Wave C W-C5a, DEC-059); `Execution_Intent` LOG when intent is enabled — SIGNAL-SCHEMA-001, implemented).
+2. Check the table contract fields: PK, routing, bucket count, the full column/type/nullability set, and the merge engine (`TableContractValidator`: `Signal_Candidates` LOG + `Signal_Candidates_current` KV PK `[instrument_token]` **and `table.merge-engine=versioned` on `evaluation_ts` (CHG-547)**; `candle_features` KV PK `(instrument_token, tf, window_start)` (the merged writer; unconditional since Wave C W-C5a, DEC-059); `Execution_Intent` LOG when intent is enabled — SIGNAL-SCHEMA-001, implemented). A merge-engine failure means the live table predates CHG-547 or was created from an older DDL: recreate it, do not bypass the check.
 3. Do NOT bypass the gate; reconcile the DDL/schema with the manifest
    (`ddl_apply.py --force` regeneration must be byte-identical) and re-run.
 4. Closure: preflight passes, job starts in the intended mode.

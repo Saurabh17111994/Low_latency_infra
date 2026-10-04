@@ -52,6 +52,11 @@ class TableContractValidatorTest {
     private static final String INSTRUCTION_ID = "instruction_id";
     private static final String EXECUTION_INTENT = "Execution_Intent";
 
+    /** CHG-547: the two table options the versioned write-ordering guard depends on. */
+    private static final String MERGE_ENGINE_KEY = "table.merge-engine";
+    private static final String MERGE_ENGINE_VER_COLUMN_KEY =
+            "table.merge-engine.versioned.ver-column";
+
     // ── signal LOG (SIGNAL-SCHEMA-001) ──
 
     @Test
@@ -160,6 +165,47 @@ class TableContractValidatorTest {
                 () -> TableContractValidator.validateSignalCurrentKvTable(
                         signal(SIGNAL_CURRENT, List.of(TOKEN), List.of(TOKEN), 16,
                                 shortTypes, false)));
+    }
+
+    // ── signal current-state KV: versioned write ordering (CHG-547) ──
+
+    @Test
+    @DisplayName("signal KV with the versioned engine on evaluation_ts passes")
+    void signalCurrentKvVersionedEnginePasses() {
+        assertDoesNotThrow(() -> TableContractValidator.validateSignalCurrentKvTable(
+                signal(SIGNAL_CURRENT, List.of(TOKEN), List.of(TOKEN), 16)));
+    }
+
+    @Test
+    @DisplayName("signal KV without the versioned merge engine is rejected (order-by-version)")
+    void signalCurrentKvMissingMergeEngineRejected() {
+        // The real failure this prevents: an LWW table lets a delayed/retried signal
+        // carrying an older evaluation_ts overwrite the newer row, and nothing on the
+        // write path can see it happen.
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateSignalCurrentKvTable(
+                        signal(SIGNAL_CURRENT, List.of(TOKEN), List.of(TOKEN), 16,
+                                new Configuration())));
+    }
+
+    @Test
+    @DisplayName("signal KV with a non-versioned merge engine is rejected")
+    void signalCurrentKvNonVersionedEngineRejected() {
+        Configuration props = versionedProps();
+        props.setString(MERGE_ENGINE_KEY, "first_row");
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateSignalCurrentKvTable(
+                        signal(SIGNAL_CURRENT, List.of(TOKEN), List.of(TOKEN), 16, props)));
+    }
+
+    @Test
+    @DisplayName("signal KV with the wrong version column is rejected (must be evaluation_ts)")
+    void signalCurrentKvWrongVersionColumnRejected() {
+        Configuration props = versionedProps();
+        props.setString(MERGE_ENGINE_VER_COLUMN_KEY, "detection_ts");
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateSignalCurrentKvTable(
+                        signal(SIGNAL_CURRENT, List.of(TOKEN), List.of(TOKEN), 16, props)));
     }
 
     @Test
@@ -462,6 +508,13 @@ class TableContractValidatorTest {
                 columnTypes, pkNonNullable);
     }
 
+    /** CHG-547: same fixture with explicit table options (merge-engine negatives). */
+    private static TableInfo signal(String name, List<String> schemaPk, List<String> bucketKeys,
+            int numBuckets, Configuration properties) {
+        return table(name, schemaPk, bucketKeys, numBuckets, SIGNAL_NAMES, SIGNAL_TYPES, null, true,
+                properties);
+    }
+
     private static TableInfo tradeDecisions(String name, List<String> schemaPk,
             List<String> bucketKeys, int numBuckets) {
         return table(name, schemaPk, bucketKeys, numBuckets, TRADE_NAMES, TRADE_TYPES, null, true);
@@ -525,6 +578,13 @@ class TableContractValidatorTest {
     private static TableInfo table(String name, List<String> schemaPk, List<String> bucketKeys,
             int numBuckets, List<String> names, List<String> typeRoots, List<String> columnTypes,
             boolean pkNonNullable) {
+        return table(name, schemaPk, bucketKeys, numBuckets, names, typeRoots, columnTypes,
+                pkNonNullable, versionedProps());
+    }
+
+    private static TableInfo table(String name, List<String> schemaPk, List<String> bucketKeys,
+            int numBuckets, List<String> names, List<String> typeRoots, List<String> columnTypes,
+            boolean pkNonNullable, Configuration properties) {
         Schema.Builder sb = Schema.newBuilder();
         int cols = columnTypes == null ? names.size() : columnTypes.size();
         for (int i = 0; i < cols; i++) {
@@ -535,14 +595,32 @@ class TableContractValidatorTest {
         if (schemaPk != null) {
             sb.primaryKey(schemaPk);
         }
-        return info(name, sb, bucketKeys, numBuckets);
+        return info(name, sb, bucketKeys, numBuckets, properties);
+    }
+
+    /**
+     * CHG-547: the live signal KV table must carry the versioned merge engine (the
+     * tablet then discards a strictly older {@code evaluation_ts} instead of
+     * overwriting the newer row), so every fixture defaults to it. The negative
+     * cases below override single keys to prove the check fails closed.
+     */
+    private static Configuration versionedProps() {
+        Configuration props = new Configuration();
+        props.setString(MERGE_ENGINE_KEY, "versioned");
+        props.setString(MERGE_ENGINE_VER_COLUMN_KEY, "evaluation_ts");
+        return props;
     }
 
     private static TableInfo info(String name, Schema.Builder sb, List<String> bucketKeys,
             int numBuckets) {
+        return info(name, sb, bucketKeys, numBuckets, versionedProps());
+    }
+
+    private static TableInfo info(String name, Schema.Builder sb, List<String> bucketKeys,
+            int numBuckets, Configuration properties) {
         // Fluss 1.0 inserted remoteDataDir BEFORE comment: two nulls, then the timestamps.
         return new TableInfo(TablePath.of("default", name), 1L, 1, sb.build(), bucketKeys,
-                List.of(), numBuckets, new Configuration(), new Configuration(),
+                List.of(), numBuckets, properties, new Configuration(),
                 null, null, 0L, 0L);
     }
 

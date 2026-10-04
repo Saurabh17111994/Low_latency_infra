@@ -2,6 +2,8 @@ package com.trading.compute.signaljob;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableInfo;
 
@@ -22,7 +24,9 @@ import org.apache.fluss.metadata.TableInfo;
  *       (DEC-035): primary key exactly {@code [instrument_token]},
  *       bucket.key exactly {@code [instrument_token]} (a subset of the PK, so
  *       per-ticker colocation holds), 16 buckets, the same exact 22-column
- *       schema as the LOG twin (tracker 14 re-scoped P2 — SIGNAL-SCHEMA-001).</li>
+ *       schema as the LOG twin (tracker 14 re-scoped P2 — SIGNAL-SCHEMA-001),
+ *       and the versioned merge engine on {@code evaluation_ts} (CHG-547) so the
+ *       tablet — not the producer's discipline — enforces write ordering.</li>
  * </ul>
  *
  * <p>Each check compares {@code TableInfo.getSchema().getColumns()} against
@@ -54,6 +58,8 @@ public final class TableContractValidator {
     }
 
     private static final String SIGNAL_CONTRACT = "tracker 14 re-scoped P2, SIGNAL-SCHEMA-001";
+    /** CHG-547: the only merge engine that enforces write ordering (Fluss MergeEngineType). */
+    private static final String VERSIONED_ENGINE = "versioned";
     private static final String TRADE_CONTRACT = "SCH-19, TRADE-SCHEMA-001";
     private static final String EXECUTION_INTENT_CONTRACT =
             "REQ-EXE-004, EXECUTION-INTENT-SCHEMA-001";
@@ -131,7 +137,10 @@ public final class TableContractValidator {
 
     
     
-    /** Signal current-state KV: PK exactly [instrument_token], instrument_token routing, exact 22-col schema. */
+    /**
+     * Signal current-state KV: PK exactly [instrument_token], instrument_token routing,
+     * exact 22-col schema, versioned merge engine on evaluation_ts (CHG-547).
+     */
     public static void validateSignalCurrentKvTable(TableInfo info) {
         List<String> expectedPk = List.of(SignalCandidatesTableColumns.NAMES[
                 SignalCandidatesTableColumns.INSTRUMENT_TOKEN]);
@@ -140,6 +149,9 @@ public final class TableContractValidator {
                 "22-column v3 signal", SIGNAL_CONTRACT);
         validateRouting(info, SignalCandidatesTableColumns.BUCKET_KEY,
                 SignalCandidatesTableColumns.BUCKET_COUNT, SIGNAL_CONTRACT);
+        validateVersionedMergeEngine(info,
+                SignalCandidatesTableColumns.NAMES[SignalCandidatesTableColumns.EVALUATION_TS],
+                SIGNAL_CONTRACT);
     }
 
     /**
@@ -242,6 +254,41 @@ public final class TableContractValidator {
             throw new ContractViolation(
                     "KV table " + info.getTablePath() + " must carry primary key exactly "
                             + expectedPk + ", got " + info.getPrimaryKeys() + " (" + contractId + ")");
+        }
+    }
+
+    /**
+     * CHG-547: the KV current-state table must be written with the versioned merge
+     * engine, versioned on its evaluation timestamp. Without it the tablet applies
+     * last-writer-wins on the primary key: a delayed or retried out-of-order signal
+     * replaces a newer row, and nothing on the write path can observe the clobber.
+     * With it the tablet drops a strictly older version (equal versions keep the
+     * newer write), so the guarantee lives in storage and holds for every writer —
+     * present or future, in-repo or not.
+     *
+     * <p>{@code table.merge-engine} is create-only, so the drift this catches is the
+     * one that actually happens: a DDL/descriptor edit or a table recreate that
+     * silently rebuilds a last-writer-wins table.
+     */
+    private static void validateVersionedMergeEngine(TableInfo info, String expectedVersionColumn,
+            String contractId) {
+        Map<String, String> properties = info.getProperties().toMap();
+        String engine = properties.get(ConfigOptions.TABLE_MERGE_ENGINE.key());
+        if (!VERSIONED_ENGINE.equals(engine)) {
+            throw new ContractViolation(
+                    "table " + info.getTablePath() + " must set "
+                            + ConfigOptions.TABLE_MERGE_ENGINE.key() + "=" + VERSIONED_ENGINE
+                            + " (" + contractId + "): without it a delayed or retried "
+                            + "out-of-order write silently replaces a newer row. Got '" + engine
+                            + "'.");
+        }
+        String versionColumn =
+                properties.get(ConfigOptions.TABLE_MERGE_ENGINE_VERSION_COLUMN.key());
+        if (!expectedVersionColumn.equals(versionColumn)) {
+            throw new ContractViolation(
+                    "table " + info.getTablePath() + " must version on '" + expectedVersionColumn
+                            + "' (" + ConfigOptions.TABLE_MERGE_ENGINE_VERSION_COLUMN.key()
+                            + "), got '" + versionColumn + "' (" + contractId + ")");
         }
     }
 

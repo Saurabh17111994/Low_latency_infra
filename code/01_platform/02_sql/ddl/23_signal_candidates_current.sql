@@ -12,14 +12,19 @@
 --   restarting after days must treat a row older than the changelog as
 --   possibly-stale and re-derive from the LOG twin.
 -- Staleness (P4-070/224): KV upserts are last-writer-wins on
--- instrument_token with NO ordering guard in the sink — a delayed/retried
--- out-of-order signal CAN clobber a newer row. Ordering is the producer's
--- contract (evaluation_ts/detection_ts epoch-millis UTC, evaluation_ts >=
--- detection_ts; see 05 twin domain contract): producers emit in order and
--- the job processes in event-time order; no Flink deduplicate/row-number
--- stage exists today. ts unit: epoch millis UTC (P4-224 — same convention
--- as the LOG twin; no _ms rename, frozen layout; no valid_until column —
--- staleness is derived, not stored).
+-- instrument_token. Ordering is now guarded in the tablet, not merely by
+-- contract: the versioned merge engine (CHG-547, table.merge-engine=
+-- versioned on evaluation_ts) DROPS a strictly older version, so a delayed
+-- or retried out-of-order signal can no longer clobber a newer row, whatever
+-- the producer, the sink or a future consumer does. Equal version = newer
+-- write wins (unchanged last-writer-wins); delete is not supported by the
+-- engine and this table has none (single-active-row design, P4-003).
+-- Ordering note: evaluation_ts/detection_ts are epoch-millis UTC,
+-- evaluation_ts >= detection_ts (see 05 twin domain contract); both must be
+-- non-null on every write (a null version column is not a valid update).
+-- ts unit: epoch millis UTC (P4-224 — same convention as the LOG twin; no
+-- _ms rename, frozen layout; no valid_until column — staleness is derived,
+-- not stored).
 -- Bucketing (P4-332, DEC-035 colocation): bucket.num=16/bucket.key=
 -- instrument_token MUST stay identical to the 05 LOG twin — single-ticker
 -- reads stay single-bucket on both sides. Pinned by
@@ -78,6 +83,11 @@ CREATE TABLE Signal_Candidates_current (
 ) WITH (
     'bucket.num' = '16',
     'bucket.key' = 'instrument_token',
+    -- CHG-547: native write-ordering guard. The tablet keeps the row with the
+    -- greater evaluation_ts; an older incoming version is discarded instead of
+    -- overwriting. Create-only: changing it needs a table recreate.
+    'table.merge-engine' = 'versioned',
+    'table.merge-engine.versioned.ver-column' = 'evaluation_ts',
     'table.log.ttl' = '7d',
     'table.datalake.enabled' = 'false', -- DEC-060: opt-in via r2-archive-sync
     'table.datalake.format' = 'iceberg',

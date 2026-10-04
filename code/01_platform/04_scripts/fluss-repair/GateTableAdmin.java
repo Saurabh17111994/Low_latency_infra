@@ -40,6 +40,12 @@ import java.util.TreeMap;
  *   java -cp "code/common/target/classes:&lt;cp.txt&gt;" GateTableAdmin recreate localhost:9123
  * </pre>
  *
+ * <p>Arg 3 may be any merge-engine DDL, not just the gate: CHG-547 reuses this
+ * tool for {@code 23_signal_candidates_current.sql} (versioned on
+ * {@code evaluation_ts}). The fail-closed guard below therefore pins the engine
+ * and that a version column is declared — which column carries it is the DDL's
+ * own contract, pinned by that table's DDL contract test.
+ *
  * <p>WARNING: recreating loses the gate KV fence state (audit survives in the Iceberg
  * lake and the store's audit log). Archive the lake prefix first — a recreate against a
  * stale iceberg dir throws {@code LakeTableAlreadyExistException}. See the CHG-122
@@ -86,15 +92,15 @@ public class GateTableAdmin {
                     break;
                 case "create":
                     admin.createTable(path, descriptor, false).get();
-                    System.out.println("CREATE OK: " + path + " (VERSIONED on fence_token)");
+                    System.out.println("CREATE OK: " + path + verSuffix(parsed));
                     break;
                 case "recreate":
                     System.out.println("WARNING: dropping " + path
-                            + " destroys the gate KV fence state (audit survives in the lake).");
+                            + " destroys its KV current-state (the LOG twin / lake is unaffected).");
                     admin.dropTable(path, true).get();
                     System.out.println("DROP OK: " + path);
                     admin.createTable(path, descriptor, false).get();
-                    System.out.println("CREATE OK: " + path + " (VERSIONED on fence_token)");
+                    System.out.println("CREATE OK: " + path + verSuffix(parsed));
                     break;
                 default:
                     throw new IllegalArgumentException("unknown subcommand: " + cmd);
@@ -110,10 +116,15 @@ public class GateTableAdmin {
     private static void assertMergeEnginePresent(DdlText.ParsedDdl parsed) {
         String engine = parsed.options().get("table.merge-engine");
         String verColumn = parsed.options().get("table.merge-engine.versioned.ver-column");
-        if (!"versioned".equals(engine) || !"fence_token".equals(verColumn)) {
+        if (!"versioned".equals(engine) || verColumn == null || verColumn.isBlank()) {
             throw new IllegalStateException("refusing to touch the cluster: "
                     + parsed.sourcePath() + " must declare table.merge-engine=versioned with"
-                    + " ver-column=fence_token, got engine=" + engine + " ver-column=" + verColumn);
+                    + " a version column, got engine=" + engine + " ver-column=" + verColumn);
         }
+    }
+
+    /** What the recreate actually installed, read back from the DDL, not a literal. */
+    private static String verSuffix(DdlText.ParsedDdl parsed) {
+        return " (VERSIONED on " + parsed.options().get("table.merge-engine.versioned.ver-column") + ")";
     }
 }

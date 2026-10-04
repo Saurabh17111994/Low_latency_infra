@@ -75,6 +75,14 @@ Order lifecycle and position lifecycle are different aggregates:
 
 `partial_update` protects independent column groups from clobbering. It does not by itself solve stale writes, ordering within one column group, broker-side idempotency, or external REST atomicity.
 
+Stale-write ordering is a **per-table** decision, not a platform default: `Execution_Gate`
+(CHG-122) and, since CHG-547, `Signal_Candidates_current` set
+`table.merge-engine=versioned` with an explicit version column, so the tablet drops a
+strictly older write and keeps last-writer-wins only at equal versions. The remaining
+documented last-write-wins sites are the ones that write with `partial_update`
+(`Position_State`, the execution-gateway projections): the versioned engine refuses
+partial updates, so those need full-row upserts before they can adopt it.
+
 ## Runtime environments
 
 | Environment | Orchestrator | Purpose |

@@ -128,7 +128,7 @@ Proposed routing review:
 | `raw_table_1`                | `instrument_token` after validation                       | Per-instrument processing order          |
 | `feature_candles_15s`        | `instrument_token`                                        | Per-instrument window history            |
 | `Signal_Candidates`          | `instrument_token` (LOG append; R-084 KV conversion reversed 2026-08-13) | Per-instrument signal locality          |
-| `Signal_Candidates_current`  | `instrument_token` (KV primary key)                            | Colocated current-state per instrument  |
+| `Signal_Candidates_current`  | `instrument_token` (KV primary key)                            | Colocated current-state per instrument; `table.merge-engine=versioned` on `evaluation_ts` since CHG-547, so an older write cannot replace a newer row |
 | `Execution_Intent`           | `instruction_id`                                               | Durable immutable execution request routing |
 | `Ranking_Results`            | ~~`evaluation_id`~~ (R-136 — was `candidate_id`) — **REMOVED from scope 2026-08-15 (CHG-005)**; DDL retained as reserved schema (in `schema_manifest.json`, applied, never written)                         | ~~Avoid cross-instrument/null ambiguity~~    |
 | `Fills`                      | `postback_event_id` when broker ID may be absent          | Every delivery is routable               |

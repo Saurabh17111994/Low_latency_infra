@@ -162,6 +162,29 @@ class DdlBootstrapSchemaAgreementTest {
     }
 
     @Test
+    @DisplayName("signal KV descriptor carries the DDL's merge-engine options (CHG-547)")
+    void signalKvDescriptorMatchesDdlMergeEngine() throws IOException {
+        // ensureTables creates this table on a fresh dev cluster, so a descriptor
+        // that drifts from the DDL would create an UNGUARDED last-writer-wins table
+        // while the apply contract believes it is versioned. Pin both sides here,
+        // not just the DDL text (SignalCurrentDdlContractTest pins the text).
+        String ddl = readDdl(ddlFileFor("Signal_Candidates_current"));
+        TableDescriptor td = DdlBootstrap.tableRegistry().get("Signal_Candidates_current");
+        assertNotNull(td, "registry missing Signal_Candidates_current");
+
+        assertEquals("versioned", option(ddl, "table.merge-engine"),
+                "DDL must declare table.merge-engine=versioned");
+        assertEquals("versioned", td.getProperties().get("table.merge-engine"),
+                "bootstrap descriptor must declare table.merge-engine=versioned");
+        assertEquals(option(ddl, "table.merge-engine.versioned.ver-column"),
+                td.getProperties().get("table.merge-engine.versioned.ver-column"),
+                "descriptor ver-column must equal the DDL's ver-column");
+        assertEquals("evaluation_ts",
+                td.getProperties().get("table.merge-engine.versioned.ver-column"),
+                "ver-column must be evaluation_ts (the signal's own event time)");
+    }
+
+    @Test
     @DisplayName("retired candle/feature entries are gone; candle_features carries the real schema")
     void candleRegistryEntriesUseRealSchemas() {
         for (String retired : List.of("feature_candles_15s", "feature_candles_15s_preview",
@@ -240,6 +263,18 @@ class DdlBootstrapSchemaAgreementTest {
         Path p = DDL_DIR.resolve(name);
         assertTrue(Files.exists(p), "missing DDL file: " + p);
         return Files.readString(p, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Reads a single-quoted {@code WITH} option value from DDL text, e.g.
+     * {@code option(ddl, "table.merge-engine")}; {@code null} when absent (an
+     * assertion failure at the call sites). Dots are escaped so
+     * {@code table.log.ttl} cannot match {@code tableXlogYttl}.
+     */
+    private static String option(String ddl, String key) {
+        Matcher m = Pattern.compile(
+                "'" + key.replace(".", "\\.") + "'\\s*=\\s*'([^']*)'").matcher(ddl);
+        return m.find() ? m.group(1) : null;
     }
 
     /** Extract the top-level CREATE TABLE column names in declared order. */

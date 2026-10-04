@@ -122,6 +122,24 @@ class SignalCurrentDdlContractTest {
     }
 
     @Test
+    @DisplayName("KV DDL pins the versioned merge engine on evaluation_ts (CHG-547 ordering guard)")
+    void kvDdlPinsVersionedMergeEngine() throws IOException {
+        String ddl = readDdl("23_signal_candidates_current.sql");
+        // Without the engine the tablet applies unconditional last-writer-wins: a
+        // delayed or retried signal carrying an older evaluation_ts overwrites the
+        // newer row (the DDL header used to document that as "NO ordering guard"
+        // and leave it to the producer contract — P4-070/224). This pin is what
+        // stops the option from being dropped in a later DDL edit.
+        assertEquals("versioned", option(ddl, "table.merge-engine"),
+                "Signal_Candidates_current must declare table.merge-engine=versioned");
+        String verColumn = option(ddl, "table.merge-engine.versioned.ver-column");
+        assertEquals("evaluation_ts", verColumn,
+                "the version column must be the signal's own evaluation time");
+        assertTrue(COLUMNS.contains(verColumn),
+                "the version column must exist in the frozen 22-column layout, was " + verColumn);
+    }
+
+    @Test
     @DisplayName("both signal DDLs agree column-for-column: 22 columns, identical types, routing, retention")
     void bothDdlsAgreeWithSharedLayout() throws IOException {
         String log = readDdl("05_signal_candidates.sql");
@@ -195,6 +213,19 @@ class SignalCurrentDdlContractTest {
 
     private static String logTtl(String ddl) {
         Matcher m = LOG_TTL.matcher(ddl);
+        return m.find() ? m.group(1) : null;
+    }
+
+    /**
+     * Reads a single-quoted {@code WITH} option value, e.g.
+     * {@code option(ddl, "table.merge-engine")}. The key's dots are escaped so
+     * that {@code table.log.ttl} cannot also match {@code tableXlogYttl}.
+     * Returns {@code null} when the option is absent (which is itself an
+     * assertion failure at the call sites).
+     */
+    private static String option(String ddl, String key) {
+        Matcher m = Pattern.compile(
+                "'" + key.replace(".", "\\.") + "'\\s*=\\s*'([^']*)'").matcher(ddl);
         return m.find() ? m.group(1) : null;
     }
 
