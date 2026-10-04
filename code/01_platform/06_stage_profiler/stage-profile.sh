@@ -400,7 +400,12 @@ start_fleet() {
 
 submit_job() {
   JOB_ID=""
-  export MULTITF_ENABLED
+  # The three branch flags reach only the `flink run` CLIENT (pipeline-lib.sh
+  # `-e FLAG="${FLAG:-false}"`), so an unset flag silently deploys a smaller
+  # graph — same job name, no error (four runs on 2026-10-04 lost the candle
+  # sink this way). Export all three so stage-capture.sh can compare what was
+  # REQUESTED against the graph the job actually runs.
+  export MULTITF_ENABLED STRATEGY_HOST_ENABLED EXECUTION_INTENT_ENABLED
   OUT="$PHASE_DIR/capture" pipeline_submit_job
   [ -n "$JOB_ID" ] || fail "SignalJob submit produced no JOB_ID"
   say "job submitted: $JOB_ID"
@@ -529,6 +534,40 @@ sample_raw() {
   fi
 }
 
+# SKIP_JOB=1 arm: measure the ingestion -> Fluss write path with NO SignalJob.
+# Why a mode and not a hand-rolled driver: `start_fleet` is ~100 lines of
+# container/env wiring and this script carries no BASH_SOURCE guard, so those
+# functions cannot be reused by `source` — the o2 ingestion-only arm
+# (2026-10-04) had to re-invent them and its driver was lost. Everything a job
+# provides is meaningless without one (vertex map, probes, checkpoint phases,
+# Flink KPIs), so those legs stay skipped; what measures the SERVER keeps
+# running: the per-ingestion `docker logs -f` mirrors start_fleet already
+# opened (capture/j1-N/java.out — the client-side OTLP append series), the
+# docker/PSI stats sampler, and the 2 s disk-latency probe. The tablet-side
+# poller is supplied by the caller, because it has to run inside the tablet
+# container (`docker exec ... stat` of the checkpoint files).
+fleet_only_capture() {
+  local secs="$1" io_pid
+  say "SKIP_JOB=1 — fleet-only capture ${secs}s, no SignalJob (write path only)"
+  start_stats_sampler "$PHASE_DIR/stages/docker-stats.log"
+  bash "$SCRIPTS_DIR/io-latency-probe.sh" "$PHASE_DIR/stages" "$((secs + 30))" \
+    >"$PHASE_DIR/stages/io-latency-probe.log" 2>&1 &
+  io_pid=$!
+  {
+    printf 'mode=fleet-only\n'
+    printf 'capture_s=%s\n' "$secs"
+    printf 'rate_hz=%s\n' "$CAPTURE_RATE_HZ"
+    printf 'ingestion_containers=%s\n' "$INGESTION_CONTAINERS"
+    printf 'ing_prefix=%s\n' "$ING_PREFIX"
+    printf 'ingestion_java_out=%s\n' "$PHASE_DIR/capture/j1-0/java.out"
+  } > "$PHASE_DIR/stages/run-meta.txt"
+  sleep "$secs"
+  kill "$io_pid" 2>/dev/null || true
+  wait "$io_pid" 2>/dev/null || true
+  stop_fleet
+  say "fleet-only capture done (${secs}s) — evidence: $PHASE_DIR/stages"
+}
+
 run_phase() {
   PHASE_NAME="$1"
   local secs="$2"
@@ -543,6 +582,12 @@ run_phase() {
     stop_fleet
     say "bring-up-only: PASS"
     exit 0
+  fi
+  if [ "${SKIP_JOB:-0}" = "1" ]; then
+    compile_probes
+    warmup
+    fleet_only_capture "$secs"
+    return 0
   fi
   submit_job
   compile_probes
@@ -646,6 +691,12 @@ say "evidence: $OUT_ROOT"
 
 if [[ ",$PHASES," == *",smoke,"* ]]; then
   run_phase smoke "$SMOKE_S"
+  if [ "${SKIP_JOB:-0}" = "1" ]; then
+    # Fleet-only arm: with no job there are no Flink stages, so the presence
+    # gate (S2-S12 read the job) and the report are empty by construction.
+    say "SKIP_JOB=1 — presence gate and report skipped (no Flink job); evidence: $OUT_ROOT/smoke"
+    exit 0
+  fi
   if python3 "$PROFILE_PY" presence --phase "$OUT_ROOT/smoke" > "$OUT_ROOT/smoke-presence.json"; then
     say "smoke presence: PASS (every stage produced samples)"
   else

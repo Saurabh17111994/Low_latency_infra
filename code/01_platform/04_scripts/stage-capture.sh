@@ -194,6 +194,43 @@ TOPOLOGY_BRANCHES="multi_tf=$(topology_has_op multi-tf-aggregator && echo on || 
 strategy_host=$(topology_has_op strategy-host && echo on || echo off) \
 execution_intent=$(topology_has_op execution-intent-producer && echo on || echo off)"
 
+# ---------------------------------------------------------------------------
+# Requested-vs-deployed topology gate (2026-10-04). HARD FAIL, deliberately
+# not env-configurable: the alternative is a silently wrong evidence file.
+#
+# The branch flags reach the `flink run` CLIENT only, and pipeline-lib.sh reads
+# them with a false default (`-e STRATEGY_HOST_ENABLED="${STRATEGY_HOST_ENABLED:-false}"`,
+# then SignalJobConfig.booleanValue(env, "STRATEGY_HOST_ENABLED", false)). A run
+# that forgot the flag therefore deploys a SMALLER graph under the same job name
+# and reports no error at all.
+#
+# 2026-10-04: four captures ran without STRATEGY_HOST_ENABLED -> no
+# candle-features-sink -> candle_features stayed empty -> every read probe
+# returned 0 rows, surfacing 3.5 min later as a bare
+# "S8.feature_read: 0 < 1 samples" and being misread as a read-path fault for
+# hours. This gate turns that into an immediate, named failure.
+#
+# Fires ONLY when the caller explicitly asked for the branch (flag=true); an
+# unset flag means a deliberately reduced arm and stays legal. Add one
+# "FLAG:vertex" pair when a future branch ships.
+# ---------------------------------------------------------------------------
+TOPOLOGY_FLAGS_REQUESTED=""
+for pair in STRATEGY_HOST_ENABLED:strategy-host \
+            MULTITF_ENABLED:multi-tf-aggregator \
+            EXECUTION_INTENT_ENABLED:execution-intent-producer; do
+  flag="${pair%%:*}"; vertex="${pair##*:}"
+  flag_val="$(printenv "$flag" 2>/dev/null || true)"
+  if [ "$flag_val" = "true" ]; then
+    TOPOLOGY_FLAGS_REQUESTED="$TOPOLOGY_FLAGS_REQUESTED $flag=on"
+    if ! topology_has_op "$vertex"; then
+      echo "!! FAIL: $flag=true but no '$vertex' vertex in the running job graph ($JOB_ID). The flag only reaches the flink-run client, whose default is false, so the deployed job is smaller than requested and this capture would record an empty branch. Re-submit with $flag=true (recipe: logs/tracker-14/2026-10-03-chg526-rerun-latency-state-growth.md)." >&2
+      exit 1
+    fi
+  else
+    TOPOLOGY_FLAGS_REQUESTED="$TOPOLOGY_FLAGS_REQUESTED $flag=off"
+  fi
+done
+
 {
   echo "started_epoch=$(date +%s)"
   echo "job_id=$JOB_ID"
@@ -213,6 +250,9 @@ execution_intent=$(topology_has_op execution-intent-producer && echo on || echo 
   echo "topology_branches=$TOPOLOGY_BRANCHES"
   echo "topology_operators=$(cut -f2 "$OUT_DIR/vertex-map.tsv" | sed 's/ -> .*//' | tr '\n' ';')"
   echo "topology_flags_source=derived-from-vertex-map (the flags reach the flink-run client, not any container)"
+  # What the caller ASKED for, next to what the graph shows — the pair that
+  # makes a silently reduced run visible in the evidence itself.
+  echo "topology_flags_requested=$TOPOLOGY_FLAGS_REQUESTED"
 } > "$OUT_DIR/run-meta.txt"
 
 echo -e "epoch\tvertex_id\toperator\tnumRecordsIn\tnumRecordsOut\tbusyMsSum\tbackpressuredMsSum\tidleMsSum" \
@@ -695,6 +735,51 @@ if [ -n "$FLUSS_PROBE_CP" ]; then
       || { echo "!! FAIL: B2 probe $src compile failed — see $OUT_DIR/javac-$src.log (FLUSS_PROBE_CP broken?)" >&2; exit 1; }
   done
   echo "B2 probes compiled -> $FLUSS_PROBE_BIN"
+fi
+
+# ---------------------------------------------------------------------------
+# Read-path expectation check (2026-10-04). WARN by default, never fatal.
+#
+# Deployed-and-healthy is not the same as readable: a capture whose read leg is
+# empty still satisfies the write-side presence rules and yields a scorecard
+# that reads as "no data" rather than "no read". This probes the closed candle
+# table exactly the way the read legs do (same FlussKvProbe argv + bootstrap).
+#
+# Runs only when the strategy branch is actually deployed, so a deliberately
+# reduced arm is never warned at. TIMING: a row exists only after the first
+# candle window seals, so a hard failure here would be a new false-failure
+# source — hence WARN + CONTINUE, bounded by READ_EXPECTATION_TIMEOUT_S, with
+# READ_EXPECTATION_STRICT=1 for the hard form. The end-of-capture presence gate
+# stays the authority on read evidence.
+# ---------------------------------------------------------------------------
+READ_ROW_COUNT=""
+READ_PROBE_TIMEOUT_S="${PROBE_TIMEOUT_S:-20}"
+READ_EXPECTATION_WAIT_S="${READ_EXPECTATION_TIMEOUT_S:-180}"
+if [ -n "$FLUSS_PROBE_CP" ] && topology_has_op strategy-host; then
+  read_deadline=$(( $(date +%s) + READ_EXPECTATION_WAIT_S ))
+  while :; do
+    READ_ROW_COUNT="$(timeout "$READ_PROBE_TIMEOUT_S" java -Dlog.dir=/tmp/fluss-probe-logs \
+      -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+      FlussKvProbe "$PROBE_CLOSED_TABLE" 15000 "$PROBE_TOKENS" "$PROBE_BOOTSTRAP" \
+      2>>"$OUT_DIR/probe-read-expectation.err" | grep -c . || true)"
+    READ_ROW_COUNT="${READ_ROW_COUNT:-0}"
+    [ "$READ_ROW_COUNT" -gt 0 ] && break
+    [ "$(date +%s)" -ge "$read_deadline" ] && break
+    sleep 5
+  done
+  {
+    echo "read_expectation_timeout_s=$READ_EXPECTATION_WAIT_S"
+    echo "read_expectation_rows=$READ_ROW_COUNT"
+    echo "read_expectation=$([ "$READ_ROW_COUNT" -gt 0 ] && echo satisfied || echo empty)"
+  } >> "$OUT_DIR/run-meta.txt"
+  if [ "$READ_ROW_COUNT" -gt 0 ]; then
+    echo "read-path expectation satisfied: $PROBE_CLOSED_TABLE returned $READ_ROW_COUNT readable row(s) for tokens $PROBE_TOKENS"
+  elif [ "${READ_EXPECTATION_STRICT:-0}" = "1" ]; then
+    echo "!! FAIL: strategy-host is deployed but $PROBE_CLOSED_TABLE returned no readable row for tokens $PROBE_TOKENS within ${READ_EXPECTATION_WAIT_S}s (READ_EXPECTATION_STRICT=1). See $OUT_DIR/probe-read-expectation.err." >&2
+    exit 1
+  else
+    echo "!! WARN: strategy-host is deployed but $PROBE_CLOSED_TABLE returned no readable row for tokens $PROBE_TOKENS within ${READ_EXPECTATION_WAIT_S}s — the read legs of this capture will be empty and the end-of-capture presence gate will decide. See $OUT_DIR/probe-read-expectation.err. Set READ_EXPECTATION_STRICT=1 to make this fatal." >&2
+  fi
 fi
 
 sample_probes() {
