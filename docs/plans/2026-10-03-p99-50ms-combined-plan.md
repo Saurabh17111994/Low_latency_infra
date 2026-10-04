@@ -195,6 +195,29 @@ Recorded so they are not re-derived; each needs its own arm/CHG before adoption.
   `bridge.slot` anomaly (`capacity_used_percent` 100, `last_frame_age_ms` growing) is still
   unexplained. Root-cause both before trusting later arms.
   Full record: `logs/tracker-14/20261004-900s-baseline-defaults.md`.
+- [x] **C2c** JFR A/B — the profiler is ruled out as the source of the ~60 s wave
+  (2026-10-04, bg task `b541eb8df` + treatment proof `b913a9054`, driver `/tmp/jfr-ab.sh`,
+  scorer `/tmp/jfrs.py`). After both tablet periodicities (C2, C2b) and the checkpoint
+  profile (C0c) were eliminated, the last named candidate was the JFR profile recording
+  that runs inside every measured window: `INGESTION_JAVA_TOOL_OPTIONS` (`stage-profile.sh:80`)
+  starts `-XX:StartFlightRecording=settings=profile,duration=1800s` **plus** an
+  `-Xlog:gc*,safepoint` file log in all three harness ingestion JVMs at once (the TM and
+  tablet recordings are `duration=900s` and expired long ago). Design: two 300 s
+  **fleet-only** captures (`SKIP_JOB=1`, CHG-545) differing in exactly one variable — ON =
+  the stock harness flags, OFF = `INGESTION_JAVA_TOOL_OPTIONS=" "` (a space, because
+  `:-` treats an empty value as unset). Runs `logs/stage-profile-jfr-on-1004-143023` and
+  `logs/stage-profile-jfr-off-1004-143023`.
+  **Treatment proven**: the 60 s OFF re-run inspected the live containers and every harness
+  ingestion JVM carried `JAVA_TOOL_OPTIONS= ` (empty) — no JFR, no gc-log.
+  **Result**: ON **1 of 30** aligned samples with worst p99 ≥ 50 ms (worst 53 ms at
+  09:02:35), OFF **6 of 60** (worst 61 ms at 09:12:16); typical p50 8–13 / p99 12–35 on
+  both sides.
+  **Verdict: JFR is exonerated** — removing the profiler does not remove the spikes, so no
+  earlier p99 number in this program was an artifact of our own recording. Side observation:
+  in fleet-only mode the wave is weaker and intermittent (bad samples ~70–190 s apart, not a
+  clean 60 s beat) than in the full-topology runs, so the SignalJob's own read load amplifies
+  the tail rather than causing it.
+  Full record: `logs/tracker-14/20261004-jfr-ab-verdict.md`.
 - [ ] **C3** Final combined certification — **F1+F2+F3 all on**, 900 s, exact pass method,
   then `make gate`.
 - [ ] **C4** Production adoption — defaults + deck env, deploy window, live verification.
