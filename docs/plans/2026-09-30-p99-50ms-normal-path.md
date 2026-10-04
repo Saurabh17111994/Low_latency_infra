@@ -61,6 +61,10 @@ downstream of the KPI point and is out of scope.
 
 ## 0. Live tracker
 
+> **2026-10-03:** the remaining W1/W2 adoption, the new append-tail fix (F3) and the combined
+> certification are consolidated into `docs/plans/2026-10-03-p99-50ms-combined-plan.md`
+> (single combined program). The W1/W2/W5 items below are tracked there.
+
 #### P1 - measurement lock
 
 - [x] **W0** Baseline re-derivation with the exact pass method (worst subtask per
@@ -71,7 +75,8 @@ downstream of the KPI point and is out of scope.
 
 - [~] **W1** Fluss source fetch window 20 → 2 ms (env-only trial; control round in flight)
 - [~] **W2** Output-buffer flush timer 10 → 2 ms (env-only trial; measured combined with W1)
-- [ ] **W3** Checkpoint materialization churn (design first, then config/code)
+- [~] **W3** Checkpoint materialization churn (design first, then config/code) — opened 2026-10-03 as
+  the next item after the L4 certification proved it is the > 100 ms tail driver on the current tree
 - [ ] **W4** TM CPU contention / slot isolation (design)
 - [ ] **W5** Structural hop reduction (only if W1–W4 miss 50 ms; design first)
 
@@ -84,9 +89,9 @@ downstream of the KPI point and is out of scope.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | P1 - measurement lock | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
-| P2 - lever rounds (combined-first for ready env levers, operator-approved 2026-09-30; one-variable-per-round as fallback) | 5 | 0 | 2 | 3 | 0 | 0 | 0 |
+| P2 - lever rounds (combined-first for ready env levers, operator-approved 2026-09-30; one-variable-per-round as fallback) | 5 | 0 | 3 | 2 | 0 | 0 | 0 |
 | P3 - certification | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
-| **Total** | **7** | **1** | **2** | **4** | **0** | **0** | **0** |
+| **Total** | **7** | **1** | **3** | **3** | **0** | **0** | **0** |
 
 ## Overview
 
@@ -186,6 +191,15 @@ checkpoint duration/recovery — restore drills both directions required.
 **ACTION** — design note → operator approval → implement if approved → smoke → 900 s.
 **WRONG IF** — checkpoint failures/durations regress or spikes persist; revert, keep the
 evidence, and let W4 carry the stall investigation.
+
+**2026-10-03 certification evidence (L4 900 s, `logs/stage-profile-20261003-l4-cert`):** on the
+current tree at the 10 s cadence the changelog's own sync cost is gone (p99 8 ms, 94/94 COMPLETED)
+but the materialization stall is now the tail driver: `tick_to_strategy` worst-subtask p99 > 100 ms
+in **45/50** snapshots (the 2026-09-29 certified tree measured **6/60**). At 60 s the same tree
+measured 8/50 (CHG-526 ON arm) — the stall is per-checkpoint, so the 10 s cadence multiplies it.
+This item is now the top blocker for the S1 (p99 ≤ 50 ms) target; the design update is recorded
+(2026-10-03, `docs/plans/2026-09-30-w3-w4-design-note.md` §7 — residual = per-checkpoint async
+persist, materialization ruled out; lever menu for operator approval).
 
 **W3-i IMPLEMENTED (2026-09-30, CHG-451; design note §3.1).** Instrumentation only, no
 behavior change: per-run ingestion **JFR** (GC+safepoint logging already existed on the

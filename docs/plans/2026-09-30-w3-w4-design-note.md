@@ -103,3 +103,127 @@ windows in 900 s, in two measured classes:
   request a different W4 scope.
 - **A3:** confirm the lever order for step 3 (recommended: W3-a → W3-b if needed; W4' only
   on evidence).
+
+## 7. Update 2026-10-03 — post-W3-d certification: the residual is the per-checkpoint async persist
+
+**Status:** proposed — for operator approval (§7.4). No code or config touched.
+**Sources:** 2026-10-03 900 s certification `logs/stage-profile-20261003-l4-cert` (job
+`e79be4c94ae8379c4ef1398bb4b59b3f`, 94 checkpoints @ 10 s, changelog filesystem, W3-d in HEAD);
+CHG-526 arms (same tree, 60 s, `logs/stage-profile-20261003-chg526-on/off`); TM log + TM
+changelog metrics from the run.
+
+### 7.1 What changed since §1–§4
+
+- W3-d (CHG-460) landed: the per-key live-mirror timers are gone (changelog +0.45 MB/min in the
+  certification; state 0.5 → 6.5 MB over the run). The single-subtask materialization stall of
+  §1 (126–216 ms on the aggregator) is **no longer the tail driver**: the certification's worst
+  sync across all subtasks is 66 ms (aggregator p99 24).
+- The residual moved to the **async phase** and it is **cluster-wide, not single-subtask**:
+  all-subtask async p50 6 / p90 55 / p99 83 / max 121 ms; 25 of 94 checkpoints carry a wave
+  (many subtasks > 50 ms at once). Sync stays small.
+- Impact at the 10 s cadence: `tick_to_strategy` worst-subtask p99 > 100 ms in **45/50**
+  snapshots (2026-09-29 certified tree: 6/60; same tree at 60 s: 8/50). The stall is
+  per-checkpoint, so the 10 s cadence multiplies it — W3 is now the S1 (p99 ≤ 50 ms) blocker.
+
+### 7.2 Mechanism — measured
+
+- **Materialization is ruled out as the wave driver.** 36 materializations completed across 24
+  keyed subtasks, durations ≤ 86 ms, and the per-checkpoint correlation with the async waves is
+  ~none (most wave checkpoints have 0 materialization starts in the preceding window). The old
+  §1 single-subtask pattern does not reproduce.
+- **The async cost is the per-checkpoint changelog persist, and the bytes are tiny:**
+  `ChangelogStateBackend_lastIncSizeOfNonMaterialization` sums to ~29–184 KB per snapshot across
+  24 subtasks. The cost is therefore **coordination/queueing, not bytes**.
+- **Leading hypothesis — the shared upload pool:** all subtasks on the TM share one filesystem
+  changelog storage with `state.changelog.dstl.dfs.upload.num-threads: 5` (default) and
+  `state.changelog.dstl.dfs.batch.persist-delay: 10 ms` (default). At a 10 s checkpoint, ~24
+  keyed subtasks request persist within a few ms; the batch delay coalesces them, then 5 threads
+  drain the queue — the last subtask's async ≈ queue depth / threads × per-upload time
+  (≈ 5 rounds × ~15 ms ≈ 75 ms), matching the measured p99 83 / max 121 ms. Fast checkpoints are
+  the ones whose persist requests arrive staggered.
+- **Open secondary — registry churn:** `TaskChangelogRegistryImpl "state is not in tracking"`
+  WARNs fired **954 times during the run** (smoke 11:26 + main 11:57–11:58 UTC) even though the
+  preflight wiped the base path (CHG-458 assumed leftovers; this is intra-run). The discard path
+  (`discard.num-threads: 1`) is the visible suspect; its contribution is unmeasured.
+
+### 7.3 Native levers (config-only, TM-level; Flink 2.2.1 options)
+
+| id | Lever (default → candidate) | Expected effect | Cost / risk |
+|---|---|---|---|
+| **W3-e1** | `state.changelog.dstl.dfs.upload.num-threads` 5 → 16 | drains the per-checkpoint queue; cuts the async tail if the hypothesis holds | TM recreate; more concurrent FS writes |
+| **W3-e2** | `state.changelog.dstl.dfs.batch.persist-delay` 10 ms → 0–2 ms | removes the batching wait; more/smaller files | TM recreate; more registry entries |
+| **W3-e3** | `UNALIGNED_CHECKPOINTS=false` (job env) | diagnostic: isolates the in-flight-data flush from the changelog persist inside the async phase | env-only; CHG-318 measured unaligned as a win for RocksDB — re-measure with the changelog |
+| **W3-e4** | `state.changelog.dstl.dfs.compression.enabled` false → true | fewer bytes (CPU trade) | only if bytes matter (they do not today) |
+| — | `state.changelog.periodic-materialize.interval` | **stays closed** (W3-c: 30 min no gain, reverted CHG-457) | — |
+
+### 7.4 Proposed measurement sequence (one lever per round, smoke first)
+
+1. **D0 (diagnostics, no config change):** extract the changelog metric series
+   (`ChangelogMaterialization_*`, `ChangelogStateBackend_*`) per snapshot alongside the
+   cp-phases timeline for one 200 s smoke; confirm the persist-queue shape (async vs upload
+   completions). No TM recreate.
+2. **W3-e3 first** (env-only): one 200 s smoke — it decides whether the tail is changelog-side
+   at all; extend to 900 s only if the smoke shows the wave collapsing.
+3. **W3-e1 next** (TM recreate): same protocol; if the async p99 drops, the queue hypothesis is
+   confirmed and the option becomes the production candidate.
+4. **W3-e2** only if e1 is insufficient. Restore drills both directions before any production
+   adoption of a TM config change.
+
+**Operator approval asks:** approve **D0 + W3-e3** (no TM recreate) and **W3-e1** as the
+follow-up lever.
+
+### 7.5 Verdict — W3-e3 900 s verified (2026-10-03)
+
+**Run:** `logs/stage-profile-20261003-w3e3-main` (job `989d1822f74c83e9e534833ce7ebaed8`,
+120 s smoke + 900 s main, unaligned OFF, changelog ON, 10 s cadence; 94/94 COMPLETED,
+presence counts for every stage, 0 errors, 4,865 rows/s unchanged).
+
+| Metric (full 900 s) | Cert (unaligned ON) | W3-e3 (unaligned OFF) |
+|---|---|---|
+| Async p50 / p90 / p99 / max | 6 / 55 / 83 / 121 ms | **0 / 19 / 32 / 44 ms** |
+| Subtasks > 50 ms (wave load) | 618 in 35/94 cps | **0 in 0/94 cps** |
+| Sync max | 66 ms | 31 ms |
+| e2e max per checkpoint | 181 ms | 94 ms |
+| `tick_to_strategy` max (worst p99/snapshot) | 359 ms | **115 ms** |
+| `tick_to_strategy` > 100 ms windows | 45/50 | 29/49 |
+| `ingest_to_monitor` max / min | 113 / 81 ms | 89 / 47 ms |
+
+- **Verdict:** the per-checkpoint in-flight dump is confirmed as the spike cause; aligned-only
+  removes it for the full run (zero wave checkpoints). The residual >100 ms windows are the
+  constant ~101–104 ms baseline (p50 unchanged), i.e. the separate W1/W2/W5 item.
+- **Production packaging decision:** hybrid (unaligned ON +
+  `execution.checkpointing.aligned-checkpoint-timeout` > 0) keeps the normal-case speed and the
+  backpressure fallback; requires one config line + TM/JM recreate and one verification round.
+  Plain OFF is the simpler alternative.
+- **Note (separate):** S11 readability tail in this run (worst-TF p99 ≈ 9.7 s) is the known
+  pre-existing readability anomaly (M4.1 measurement-coverage register), not a checkpoint effect.
+
+### 7.6 Verdict — hybrid packaging verified (2026-10-03)
+
+**Run:** `logs/stage-profile-20261003-w3hybrid-main` (job `3f9bc67428ffe9e68f58202d1b8be8a4`,
+120 s smoke + 900 s main, unaligned ON + `execution.checkpointing.aligned-checkpoint-timeout: 10 s`,
+changelog ON, 10 s cadence; 94/94 COMPLETED, presence PASS, 4,866 rows/s, 0 errors).
+
+| Metric (full 900 s) | CERT (unaligned) | Aligned-only | **Hybrid** |
+|---|---|---|---|
+| Checkpoint types | UNALIGNED | CHECKPOINT | **CHECKPOINT (0 conversions)** |
+| Async p90 / p99 / max | 55 / 83 / 121 ms | 19 / 32 / 44 ms | **18 / 30 / 65 ms** |
+| Subtasks > 50 ms | 618 in 35 cps | 0 | **9 in 2 cps** |
+| Sync max | 66 ms | 31 ms | 36 ms |
+| e2e max per checkpoint | 181 ms | 94 ms | 113 ms |
+| `tick_to_strategy` max | 359 ms | 115 ms | 120 ms |
+| `tick_to_strategy` > 100 ms | 45/50 | 29/49 | 35/50 |
+| `ingest_to_monitor` max | 113 ms | 89 ms | 91 ms |
+
+- **Verdict:** hybrid ≡ aligned-only within run noise (the hybrid run's ingestion S5 was
+  p50 33 vs 26 ms — the host was ~20% slower; the 9 subtasks > 50 ms track that, not hybrid
+  overhead). The safety switch never fired: all 94 checkpoints completed aligned.
+- **Decision (operator, 2026-10-03):** adopt **aligned-only** (`UNALIGNED_CHECKPOINTS=false`) —
+  the hybrid was verified equivalent (above) but the operator chose the simpler mode. Production
+  config: CHG-543 (VM template + local env flag); the hybrid line was removed from both decks
+  before deployment (CHG-542 kept as the documented re-upgrade path).
+- **Accepted trade-off:** aligned saves wait for the marker; under real backpressure the wait can
+  grow (the hybrid's auto-fallback would have covered it). Production has shown no backpressure;
+  re-upgrade to the hybrid = one line (CHG-542).
+- **Validation:** 92 + 79 tests green. Live verification at the next production start window
+  (same window as CHG-541); rollback = `UNALIGNED_CHECKPOINTS=true`.
