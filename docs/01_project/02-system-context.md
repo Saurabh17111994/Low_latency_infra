@@ -79,9 +79,16 @@ Stale-write ordering is a **per-table** decision, not a platform default: `Execu
 (CHG-122) and, since CHG-547, `Signal_Candidates_current` set
 `table.merge-engine=versioned` with an explicit version column, so the tablet drops a
 strictly older write and keeps last-writer-wins only at equal versions. The remaining
-documented last-write-wins sites are the ones that write with `partial_update`
-(`Position_State`, the execution-gateway projections): the versioned engine refuses
-partial updates, so those need full-row upserts before they can adopt it.
+documented last-write-wins sites are `Position_State` (protected today only by an
+application contract, `29_position_state.sql:47` — "`source_version` … writer MUST
+ignore stale versions") and the execution-gateway projections (`docker-stack.yml:1040-1044`,
+P3-326). The versioned engine refuses partial updates, so each of those tables needs a
+**per-table writer audit** before adoption: one effective full-row writer per row and a
+non-null monotonic version column. *Corrected 2026-10-04:* the earlier wording here said
+those tables "write with `partial_update`" — that is not supported by the code; the gateway
+projector already upserts full rows (`FlussProjectionWriter.java:226,231`) and
+`partial_update` appears only in the ownership contract (`ColumnOwnership.java:12`) and its
+tests.
 
 ## Runtime environments
 

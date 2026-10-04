@@ -32,7 +32,9 @@ Deviations from the plan, each deliberate:
   cosmetic and was not done.
 - **`docs/09_data_gaps.md` does not exist** (the plan's §4.6 named it). The stale-write gap
   is recorded where it actually lives: `docs/01_project/02-system-context.md:76` now names
-  the two versioned tables and why the `partial_update` writers cannot adopt the engine.
+  the two versioned tables and the reason the engine refuses partial updates (corrected
+  2026-10-04: no production writer calls `partialUpdate(...)`, so adoption is gated by a
+  per-table writer audit, not by a change of write mode).
 - **A recreate runbook section was added** (`docs/06_operations/01-runbooks.md`,
   "Signal_Candidates_current recreate (versioned merge engine, CHG-547)") beside the gate's
   CHG-122 one, including the DDL-path-is-argument-3 trap.
@@ -125,8 +127,13 @@ code (the money gate), by a change that shipped and passed its drills.
 
 - **`Position_State` and the execution-gateway projections** (the other documented LWW-clobber sites:
   `docker-stack.yml:1040-1044`, P3-326, `FlussProjectionWriter`, `PostbackQuarantineStore`). Same
-  pattern, but blocked: versioned merge is **incompatible with partial updates**, so those projector
-  writers need full-row upserts first. Separate change.
+  pattern, but gated: versioned merge is **incompatible with partial updates**, and these are the
+  tables whose design is multi-writer column-group ownership (DEC-005). *Corrected 2026-10-04:*
+  the blocker is a per-table writer audit, not a mechanical "move off partial updates" — the gateway
+  projector already upserts full rows (`FlussProjectionWriter.java:226,231`) and `partial_update`
+  appears only in the ownership contract and its tests. The audit asks: is there one effective writer
+  per row, is the version column non-null and genuinely monotonic, and does any reader depend on
+  columns that a partial write would leave untouched? Separate change.
 - Re-keying `Signal_Candidates` (LOG) on `candidate_id` — tried and reverted 2026-08-13 (DEC-035).
 - Changing retention/TTL or `bucket.num` (P4-332/DEC-035 pin them; the LOG twin must stay colocated).
 - Any Flink-side dedup/row-number stage (unnecessary once the tablet orders by version).
