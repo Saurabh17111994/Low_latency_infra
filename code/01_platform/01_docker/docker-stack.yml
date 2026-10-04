@@ -190,6 +190,15 @@ configs:
   # config name, which fails loudly instead of silently serving stale instruments.
   manifest-nse:
     file: ${MANIFEST_FILE:-./instruments/NSE_CM_EQUITY.csv}
+  # CT-4A production prerequisite (2026-10-03): Flink 2.2.1 changelog
+  # filesystem-storage plugin (flink-dstl-dfs). The stock flink image does not
+  # ship it, so `state.changelog.storage: filesystem` fails at TaskManager
+  # storage creation without it. Delivered as a Swarm config, not a host bind:
+  # the repo path differs per VM, and a bind source missing on the node the task
+  # landed on is a recorded production failure (PROD_VM_PROVISIONING S8b).
+  # Immutable by design — a new plugin version needs a NEW config name.
+  flink-dstl-dfs-jar:
+    file: ./flink-plugins/dstl-dfs/flink-dstl-dfs-2.2.1.jar
 
 services:
   # ---- ZooKeeper: 3-member ensemble (quorum 2-of-3), one member per VM ------
@@ -848,10 +857,17 @@ services:
       # the fencing token 0...0 did not match the expected fencing token
       # 9f3175f098076291f8095be45eee44b3", leaving {"taskmanagers":[]} (run9).
       # (Same no-prose-inside-the-block rule as the jobmanager above.)
+      # CT-4A (2026-10-03): changelog filesystem storage (the checkpoint-block
+      # fix). TaskManager-level, like the dev deck (CHG-444): the storage
+      # factory comes from the plugin config mounted below, and the base path
+      # sits on the node-local flink-checkpoints volume (single-node deck; the
+      # real 4-VM rig needs a shared base path before adoption there).
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.rpc.port: 6123
         taskmanager.rpc.bind-port: 6123
+        state.changelog.storage: filesystem
+        state.changelog.dstl.dfs.base-path: file:///checkpoints/changelog
         high-availability.type: zookeeper
         high-availability.zookeeper.quorum: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
         high-availability.storageDir: ${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH}
@@ -880,6 +896,12 @@ services:
     volumes:
       - flink-checkpoints:/checkpoints
       - flink-logs:/opt/flink/log
+    # CT-4A: the changelog filesystem-storage factory must be on the TaskManager
+    # plugins classpath (TaskExecutorStateChangelogStoragesManager reads the
+    # TaskManager configuration). The JobManager does not need this jar.
+    configs:
+      - source: flink-dstl-dfs-jar
+        target: /opt/flink/plugins/dstl-dfs/flink-dstl-dfs-2.2.1.jar
     secrets:
       - aws_access_key_id
       - aws_secret_access_key

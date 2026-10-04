@@ -104,6 +104,13 @@ x-flink-common: &flink-common
     # kill switch. No storage effect: sealed rows stay closed-only. Read from
     # the job process environment, so it lives in this shared anchor.
     FEATURE_LIVE_PRECOMPUTE: ${FEATURE_LIVE_PRECOMPUTE:-true}
+    # 2026-10-03 (CHG-541): checkpoint changelog state backend — removes the
+    # 300-600 ms checkpoint sync block (certified 2026-10-03: sync p99 8 ms,
+    # 94/94 checkpoints; CHG-443/CHG-540 are the TM plugin/keys prerequisite).
+    # Read from the job process environment like the flags above. Rollback =
+    # false (both directions drilled, CHG-443); restores set claim-mode=CLAIM
+    # automatically (SignalJob.java:613-621).
+    CHANGELOG_STATE_BACKEND: ${CHANGELOG_STATE_BACKEND:-false}
     EXECUTION_INTENT_ENABLED: ${EXECUTION_INTENT_ENABLED:-false}
     <<: *execution_identity
     EXECUTION_PRODUCT_TYPE: ${EXECUTION_PRODUCT_TYPE:-CNC}
