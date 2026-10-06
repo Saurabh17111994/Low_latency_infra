@@ -1,5 +1,11 @@
 # p99 ≤ 50 ms — full combined plan (2026-10-03)
 
+> **Sequencing now owned by `docs/plans/2026-10-06-p99-integrated-program.md`** (2026-10-06).
+> That file holds the latency budget with per-leg instruments, the experiment design (noise floor,
+> repeats, run hygiene), the decision rules, and the acceptance gate. This file remains the
+> arm-by-arm evidence ledger (C0b…C0e, C2b, C2c, deferred levers); do not start a new arm from
+> here without attaching it to a budget leg there.
+
 **One program, one combined change set, one certification round.** This consolidates the
 remaining p99 work: the two measured env levers (fetch window, output-buffer flush), the new
 append-ack-tail fix found by the 2026-10-03 diagnosis, and the final combined certification +
@@ -161,6 +167,138 @@ inputs.
   profile (max 370 → 139 and 364 → 128, −62 % / −65 %), so **aligned-only + changelog
   backend stays the standing recipe for tail hygiene** — it just is not the p99-floor
   lever. Evidence record: `logs/tracker-14/20261004-c0c-changelog-aligned-arm.md`.
+
+- [x] **C0d** F1+F2 arm — `fetch 2 / buffer 2`, full topology, code-default checkpoint
+  profile, 900 s (2026-10-06, bg `b4bcb5d00`, driver `/tmp/armF1F2.sh`, run
+  `logs/stage-profile-armF1F2-1006-101109`, job `e605164c8c373303003ef0761566a947`,
+  smoke presence gate PASS, `read_expectation=satisfied`, 16 × `UNALIGNED_CHECKPOINT`):
+
+  | KPI | C0b (fetch 20 / buffer 10) | C0d (fetch 2 / buffer 2) |
+  |---|---|---|
+  | `ingest_to_monitor` | median 75.5 / max 114 / 49-of-50 ≥ 50 / **15/15 failing** | median **42.0** / max 464 / 22-of-49 / **10/15 failing** |
+  | `tick_to_strategy` | median 93.5 / max 370.1 / 50/50 / 15/15 failing | median 81.0 / max 665.0 / 49/49 / **15/15 failing** |
+  | `ingest_to_strategy` | median 85.0 / max 364.0 / 50/50 / 15/15 failing | median 63.0 / max 654.0 / 35/49 / 15/15 failing |
+
+  Verdict against the pre-committed rule (median materially down **and** fewer failing
+  windows): **met for `ingest_to_monitor`** (−44 % median, 15 → 10 failing windows),
+  **not met for `tick_to_strategy`** (median −13 %, 15/15 unchanged) and not met for
+  `ingest_to_strategy`. So **F1+F2 alone does not close S1** (`tick_to_strategy` never
+  passes a window), and it is not sufficient grounds for flipping the defaults on its own.
+  Tail regression: the maxima are far worse (114 → 464 and 370 → 665 ms) and the worst
+  samples sit ~55–56 s apart (10:20:35, 10:21:31, 10:25:37, 10:26:31, 10:29:36, 10:30:31)
+  = the **checkpoint cadence** (16 checkpoints / 891 s) — the tail is checkpoint-driven,
+  and this arm ran the dev-default `UNALIGNED_CHECKPOINTS=true` that CHG-543 already
+  certified as tail-hostile (618 wave samples / 359 ms spike vs 0 / 115 ms aligned-only).
+  Cost side looks healthy: append ack p50 15 / p90 21 / p99 **27 ms** (C0b 17/32/43),
+  throughput parity 4 866 ticks/s, slowest operator `candle_features_sink:_Writer`
+  5.0/7.0/9.7 ms (C0b 22.0/33.6/61.2).
+  Measurement caveat (integrity, not performance): the deck's `01_docker-ingestion-1` was
+  up and connected to the **live Arrow broker** (market open, `hft` slots subscribed at
+  10:08:53 IST) for the **entire** capture (10:18:11 → 10:33:02 IST; one container restart
+  at 10:27:08 IST, `RestartCount=1`), appending real ticks into the same `raw_table_1`
+  (raw rows 4 841 → 5 825/s; tablet bytes +179 → +405 MB/min). Two consequences: the
+  improvement survives *extra* load, but (a) the tail and the growth number are not a clean
+  A/B and (b) `tick_to_strategy` is a **mix of fake-feed (ms) and real-feed (whole-second
+  broker label) samples**, so it is not a valid platform number from this arm → the next
+  arm must run with the deck ingestion stopped (or off-hours).
+  Next arm: same F1+F2 **plus the certified profile** (`UNALIGNED_CHECKPOINTS=false`,
+  `CHANGELOG_STATE_BACKEND=true`) — tests whether the checkpoint-driven tail collapses and
+  whether `tick_to_strategy` moves at all.
+  Evidence record: `logs/tracker-14/20261006-block2-f1f2-arm.md`.
+
+- [x] **C0e** clean arm — same F1+F2 **plus the certified checkpoint profile**
+  (`UNALIGNED_CHECKPOINTS=false`, `CHANGELOG_STATE_BACKEND=true`), run with the deck's live
+  ingestion writer **stopped** (2026-10-06, bg `b056a271f`, driver `/tmp/armClean.sh`).
+  Why: C0d's `tick_to_strategy` mixed fake-feed (ms) and real-feed (whole-second broker
+  label) samples, and its tail was checkpoint-driven under the dev profile — this arm makes
+  the tick→strategy number valid and tests whether the checkpoint tail collapses.
+  Operator instruction that scoped it (m03368): *"but i want lo latency from tick i got from
+  broker till my strategy host reading it"* — i.e. `tick_to_strategy` /
+  `ingest_to_strategy` are the primary KPIs here, not `ingest_to_monitor`.
+  Primary KPIs scored: `tick_to_strategy`, `ingest_to_strategy` (both host-read anchored);
+  vs C0b (20/10, dev profile) and vs C0d (2/2, dev profile, live writer present).
+  **Verdict (2026-10-06, 48 snapshots / 889 s; rc 1 for prom truncation only — smoke presence
+  gate PASSED with every read rule non-zero, 7 operators, `read_expectation=satisfied` 12 rows):**
+  - `ingest_to_monitor` median **68.0** / max 463 / 48-of-48 ≥50 / **15/15 windows failing**
+    (C0b 75.5 / 114 / 49-of-50 / 15-15; C0d 42.0 / 464 / 22-of-49 / 10-15);
+  - `tick_to_strategy` median **84.0** / max 470 / 48-48 / **15/15 failing**
+    (C0b 93.5 / 370 / 50-50 / 15-15; C0d 81.0 / 665 / 49-49 / 15-15);
+  - `ingest_to_strategy` median **72.5** / max 467 / 48-48 / 15-15
+    (C0b 85.0 / 364 / 50-50; C0d 63.0 / 654 / 35-49).
+  - Treatment proven: 15/15 `main/stages/cp-phases-detail.jsonl` entries are `"type":"CHECKPOINT"`
+    with `"ua":false` (aligned, ~59 s cadence), and `/checkpoints/changelog/e8207f516201fb8382956e46c22a69a9`
+    is the only directory under `/checkpoints/changelog`.
+  - **The certified profile did NOT help**: medians are back at C0b's level and the tail (max 463)
+    is unchanged from C0d. C0d→C0e differs in two variables (checkpoint profile **and** live writer
+    present), so this pair isolates neither; with a run-to-run median spread of ~±25 ms
+    (C0b 75.5 / C0d 42.0 / C0e 68.0) the F1+F2 monitor gain is **not established** and a single
+    900 s arm cannot resolve differences that small.
+  - **Write path was the fastest of the three arms while the read-side KPIs were the worst**:
+    `main/stages/ingestion.tsv` capture medians `append.latency.ms` p50 12 / p90 17 / p99 23,
+    `append.pending.records` 663 (C0d 15/21/27, 474; C0b 16/30/42, 576) ⇒ the difference is on the
+    **Flink read side**, not the tablet. Host metrics flat (`util_pct` 2–3 %, `w_await` 0.8–1.7 ms,
+    `cpu_idle` 58–70 %, `mem_avail` ≈3.35 GB).
+  - **New per-hop decomposition** (native Flink latency markers — already wired, no new code:
+    `metrics.latency.interval: 1000` at `code/01_platform/01_docker/docker-compose.yml:253`,
+    `-Dmetrics.latency.interval="${LATENCY_TRACKING_MS:-2000}"` at
+    `code/01_platform/04_scripts/pipeline-lib.sh:1118`; parser `/tmp/hops.py`): at **p50 the whole
+    DAG costs ~4 ms** (source→dedup +1.0, →multi-tf-aggregator +1.2, →strategy-host +1.8, sinks
+    +0–1) ⇒ the "3–5 hops × 10 ms buffer = 30–40 ms transit" model is **dead** at buffer 2 ms.
+    At **p99** the dominant in-DAG term is the **aggregator hop +40.6 ms** (cumulative 47.2), host
+    hop +3.5 (50.7). Sink p99s (777 / 538 / 720) are flagged as probable sparse-stream marker
+    artifacts (candidates ≈3 rows/s, candle_features ~1.5 writes/s), not verified transit.
+  - **Where the remaining time sits**: `ingest_to_monitor` p99 68 minus cumulative source→dedup p99
+    6.5 leaves **~35–40 ms between the ingestion client's ack and the row being emitted by the Flink
+    source** (client append p99 is only 23; `scanner fetchLatencyMs default.raw_table_1` med 2 / max 4,
+    so F1 is effective). `ingest_ts` is stamped inside `TypedFlussRowConverter.append()`
+    (`code/02_services/01_ingestion/src/main/java/com/trading/ingestion/TypedFlussRowConverter.java:151-169`),
+    i.e. after `RawTickWriter.write()` took `acceptTime`
+    (`code/02_services/01_ingestion/src/main/java/com/trading/ingestion/write/RawTickWriter.java:180-190`),
+    so the KPI *understates* true accept→monitor — it is not definitionally inflated.
+  - Caveat: the final ~26 s of latency samples are missing
+    (`stage-capture: FAIL: last prom scrape was 26s ago (budget 25s at interval 5s; TM prom
+    endpoint died before capture end)`).
+  - **Corrected 2026-10-06 (C0f)**: that "~35–40 ms" gap was measured against a single arm; two
+    identical arms put it at **65–69 ms**, and they also show C0e's aggregator p99 hop (+40.6 ms) did
+    not reproduce. See C0f.
+  Evidence record: `logs/tracker-14/20261006-c0e-clean-arm-certified-profile.md`.
+
+- [x] **C0f** Task 1 noise floor — two identical 900 s arms (2026-10-06 12:09→12:56 IST, bg task
+  `b753af2ad`, driver
+  `logs/tracker-14/20261006-task1-noise-floor-attachments/task1-noise.sh`, arms
+  `logs/stage-profile-task1-noise-1006-120852-a{1,2}`). Recipe = C0e verbatim: F1+F2 + certified
+  profile (`UNALIGNED_CHECKPOINTS=false CHANGELOG_STATE_BACKEND=true`), full topology (7 operators),
+  deck writer `01_docker-ingestion-1` stopped for both (restored healthy after), `SMOKE_S=200
+  MAIN_S=900`. Both arms rc=0, gate PASS, 49 snapshots.
+
+  | KPI (worst-subtask p99, 60 s windows) | arm 1 median | arm 2 median | delta | arm 1 max | arm 2 max | failing windows |
+  |---|---|---|---|---|---|---|
+  | `ingest_to_strategy` (PT1) | 79.0 | 73.0 | **6.0** | 109.1 | 109.0 | 15/15 both |
+  | `ingest_to_monitor` (S1) | 72.0 | 68.0 | **4.0** | 77.0 | 74.0 | 15/15 both |
+  | `tick_to_strategy` (ms feed) | 91.0 | 83.0 | **8.0** | 119.0 | 118.0 | 15/15 both |
+
+  - **Noise floor = 8 ms.** Any future arm must beat 12 ms (1.5×) *and* repeat to be called real;
+    compare medians, never maxima (C0e monitor max was 463 against 74–77 here, same config).
+  - **L7 confirmed as the dominant, reproducible term**: monitor p99 68–72 minus cumulative
+    source→dedup p99 2.7–3.4 ⇒ **65–69 ms** between the ingestion ack and the row being emitted by
+    the Flink source. In-DAG p50 is +1.0/+1.0/+2.0 and p99 cumulative to strategy-host is 6.7/8.0 —
+    i.e. **the ~4 ms DAG is not the problem and no in-DAG lever can move PT1 by more than ~10 ms**.
+  - **C0e's aggregator p99 hop (+40.6 ms) did not reproduce** (+1.3/+2.3 here) → the aggregator is
+    withdrawn as a target unless it recurs (OQ6 in the integrated program).
+  - **L1 (append ack) is noisy across identical runs**: p99 median 60 (arm 1) / 33 (arm 2) / 23 (C0e).
+    Single-arm L1 claims are worthless; the SLO carrier is the read-side KPI.
+  - **S11 (`window close → first read`, declared SLO p99 ≤ 75 ms) is instrument-limited**: measured
+    7 160 / 1 258 ms with every one of 35 226 windows "violating"; earlier arms 3 563 (C0b) / 9 576
+    (C0d). `stage_profiler.py:774-784` takes column 6 of `closeread.tsv` = window close → *first
+    sighting by the capture-loop probe*, whose period is 17 s median / 24 s max — the path cannot
+    resolve 75 ms, so the number tracks probe cadence, not the platform. Logged as OQ5.
+  - **The prom-staleness check is borderline, not wrong**: budget `max(CAPTURE_INTERVAL_S×5, 25)`
+    (`stage-capture.sh:1198-1208`) vs measured spacing 17 s median / 24 s max — C0e exited 1 on it
+    at 26 s; both arms here exited 0 on the same cadence. Task 2 fixes the budget.
+  - Cost guards green: throughput 4 962 / 5 019 rows/s, backpressure ≤ 85 ms/s, busiest operator
+    ≤ 103 ms/s, 15/16 aligned checkpoints, GC ≥15 ms at 11/7 events (max 30.2 / 35.9 ms),
+    `raw_table_1` +187.09 / +175.32 MB/min with the deck writer stopped.
+  Evidence record: `logs/tracker-14/20261006-task1-noise-floor.md`.
 
 ### Deferred levers — read-only sweep 2026-10-04 (no changes made)
 
