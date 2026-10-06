@@ -189,6 +189,16 @@ public final class ConfigGuard {
         StringBuilder corpus = new StringBuilder();
         try (Stream<Path> walk = Files.walk(dir)) {
             List<Path> files = walk
+                    // Build outputs are not source. Walking them is both
+                    // pointless (a key read only in target/ cannot exist — the
+                    // file it would be read from is generated from src/) and
+                    // racy: surefire rewrites target/surefire-reports while a
+                    // test is running, and the walk's own readAttributes on a
+                    // file that another JVM just deleted threw
+                    // NoSuchFileException / UncheckedIOException out of .toList()
+                    // (observed 2026-10-06 in ConfigGuardTest, which reads the
+                    // corpus from inside the very build that is writing it).
+                    .filter(p -> !isBuildOutput(p))
                     .filter(Files::isRegularFile)
                     .filter(p -> p.toString().endsWith(".java"))
                     .filter(p -> !p.getFileName().toString().equals(DECLARATIONS_FILE))
@@ -198,6 +208,16 @@ public final class ConfigGuard {
             }
         }
         return corpus.toString();
+    }
+
+    /** True for anything under a Maven {@code target/} directory. */
+    private static boolean isBuildOutput(Path p) {
+        for (Path part : p) {
+            if (part.toString().equals("target")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
