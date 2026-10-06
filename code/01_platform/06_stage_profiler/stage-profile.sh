@@ -76,8 +76,11 @@ ING_PREFIX="sp-ingestion-"
 # /logs/gc.log (captured via the j1 mount); this adds the bounded JFR recording
 # plus an independent /tmp GC copy, on every per-run ingestion writer. Both are
 # pulled into the round evidence by stop_fleet(). No application behaviour
-# change; an empty value disables it.
-INGESTION_JAVA_TOOL_OPTIONS="${INGESTION_JAVA_TOOL_OPTIONS:--Xlog:gc*,safepoint:file=/tmp/gc.log:time,uptime,level,tags:filecount=1,filesize=50m -XX:StartFlightRecording=settings=profile,duration=1800s,filename=/tmp/ing-diag.jfr,maxsize=64m}"
+# change; an empty value disables it — which needs `${VAR-default}`, not `${VAR:-default}`:
+# the `:-` form treats an explicit empty value as unset and would silently re-enable both
+# flags, so an A/B that means "no instrumentation" would measure the instrumented build
+# (found the hard way by the 2026-10-04 JFR arm, CHG-548).
+INGESTION_JAVA_TOOL_OPTIONS="${INGESTION_JAVA_TOOL_OPTIONS--Xlog:gc*,safepoint:file=/tmp/gc.log:time,uptime,level,tags:filecount=1,filesize=50m -XX:StartFlightRecording=settings=profile,duration=1800s,filename=/tmp/ing-diag.jfr,maxsize=64m}"
 LOG_PIDS=()
 JOB_ID=""
 CP=""

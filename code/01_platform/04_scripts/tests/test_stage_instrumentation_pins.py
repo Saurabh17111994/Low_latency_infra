@@ -20,6 +20,8 @@ attribute the outliers -- the same silent-gap class the W1 fetch-wait pin
 """
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
@@ -86,6 +88,37 @@ def test_ingestion_jvm_instrumentation_defined_and_applied() -> None:
         "JAVA_TOOL_OPTIONS must be applied to BOTH ingestion launch branches "
         f"(faketool + real); found {applied}"
     )
+
+
+def test_ingestion_jvm_flags_are_disableable_with_an_empty_value() -> None:
+    """CHG-548: ``${VAR:-default}`` treats an explicitly empty value as unset, so
+    ``INGESTION_JAVA_TOOL_OPTIONS=""`` silently re-enabled the GC log and the JFR
+    recording. The 2026-10-04 JFR A/B only proved its treatment by inspecting the
+    live containers, which is exactly the failure this pin removes: it evaluates the
+    profiler's real assignment, so the three states stay correct — unset -> the
+    default flags, empty -> disabled, explicit value -> passed through."""
+    line = next(
+        l for l in _src().splitlines() if l.startswith("INGESTION_JAVA_TOOL_OPTIONS=")
+    )
+
+    def resolved(value: str | None) -> str:
+        env = {
+            k: v for k, v in os.environ.items()
+            if k != "INGESTION_JAVA_TOOL_OPTIONS"
+        }
+        if value is not None:
+            env["INGESTION_JAVA_TOOL_OPTIONS"] = value
+        out = subprocess.run(
+            ["bash", "-c", f'{line}\nprintf %s "$INGESTION_JAVA_TOOL_OPTIONS"'],
+            capture_output=True, text=True, env=env, check=True,
+        )
+        return out.stdout
+
+    default = resolved(None)
+    assert "-Xlog:gc*,safepoint:file=/tmp/gc.log" in default
+    assert "-XX:StartFlightRecording=settings=profile" in default
+    assert resolved("") == "", "an empty value must disable the instrumentation"
+    assert resolved("-XX:+UseG1GC") == "-XX:+UseG1GC"
 
 
 def test_ingestion_and_tm_jvm_artifacts_are_pulled_into_evidence() -> None:
