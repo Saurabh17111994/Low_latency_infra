@@ -69,6 +69,12 @@ non-null.
   main sources contain no reference to them (`rg` → 0 hits). So the DDL header's "enforced in
   `PositionProjector.apply`" is true for the executor's own path and **not** for the gateway's.
 
+> **Corrected 2026-10-06 (Block 1, §10): "two writers" is wrong — the executor writes no Fluss
+> table at all.** Its `projection` module is a differential-parity oracle for the Java projector,
+> and the only event it emits to the gateway carries `"position": null`. The precondition to prove
+> therefore changes shape: not "are the two version spaces comparable?" but "wire a producer, then
+> prove one space per key".
+
 ## 5. `Order_Lifecycle` — do not adopt
 
 The M1-6 gate (`OrderLifecycleWriteGate.java:17`) is strictly stronger than the engine: it reads the
@@ -121,3 +127,60 @@ What does a merge-**rejected** stale write put into the changelog — the retain
 one? The CHG-547 Q1 probe measured that a rejection appends exactly one record, not its content.
 This matters only to changelog consumers; `Position_State` has none and `Signal_Candidates_current`
 has none today, so it is a prerequisite for any future tailing consumer rather than a blocker here.
+
+## 10. Block 1 close-out (2026-10-06): the `Positions` premise was void
+
+Read-only pass (no cluster; the dev stack is down — fluss/flink/ingestion `Exited (127)` — and
+the conclusion below is source-level, so no live row sample was needed).
+
+1. **The executor cannot write Fluss.** `code/02_services/04_executor/Cargo.toml` has no `fluss`
+   dependency at all. `code/02_services/04_executor/src/execution/client.rs:235` calls the
+   `PositionProjector` a "differential-test oracle", and
+   `code/02_services/04_executor/src/projection/mod.rs:8-9` says the port exists "byte-for-byte so
+   the differential parity test proves Rust == Java oracle for the same fill sequence". `lib.rs:19`
+   declares `pub mod projection`, but main code uses it only for the `PositionSnapshot` /
+   `PositionState` types (`babysitter.rs:10`) — never for a write.
+2. **The executor's only gateway emission is a LIFECYCLE event**: `events.rs:25`
+   `EVENT_TYPE_LIFECYCLE = "LIFECYCLE"`, `:128 "fill": null`, `:143 "position": null`, and
+   `:138 "sourceVersion": lifecycle_source_version(report.received_ts_ms, &postback_event_id)`.
+   That version's construction (`events.rs:57-76`) is
+   `clamp(received_ts_ms, 0, MAX_VERSION_RECEIVE_TIME_MS) * VERSION_SLOTS_PER_MILLIS
+   + (fnv1a64(postback_event_id) % VERSION_SLOTS_PER_MILLIS)` — the H1-5 construction, byte-identical
+   to the Java `FillEventMapper.fillVersion` family, i.e. a **millisecond-scaled** space
+   (~1e15 today), not a small counter.
+3. **The comparison that was pending is therefore a non-comparison.** Oracle side = the bridge
+   report's own fill sequence, a small monotone counter (`projection/mod.rs:82`, documented `:754`).
+   Lifecycle side = the ms-scaled H1-5 value. Had the engine been adopted on `Positions` with both
+   fed to one key, `compare(old,new) > 0 ? old : new` would have ignored every small-sequence write
+   **silently and permanently** (no exception is thrown by the engine).
+4. **Nothing feeds the gateway's position path today.** Repo-wide, `"position":` appears in exactly
+   one main-code place — `events.rs:143`, as `null`. The intake deserializes the posted body
+   straight into the record
+   (`code/02_services/06_execution_gateway/src/main/java/com/trading/execution/gateway/ExecutionGatewayMain.java:148`
+   `applier.apply(mapper.treeToValue(payload, NormalizedExecutionEvent.class))`), so a
+   position-bearing event exists only if some producer starts sending one.
+5. **Consequence for `10_positions.sql`.** Its header (`:20-23`) claims last-writer-wins on
+   `source_version` + dedup on `source_event_id` "enforced in `PositionProjector.apply` via
+   `KvStateUpdateProtocol.evaluate` (STALE/REGRESSION rejected)". That is true of the Rust oracle
+   and of the unwired `code/common/src/main/java/com/trading/common/schema/projection/PositionProjectionWriter.java`,
+   and **false for the live path**: `FlussProjectionWriter.positionRow` builds the row and
+   blind-upserts it (`FlussProjectionWriter.java:134`). Same class of stale prose as the
+   `Position_State` claim fixed in Block 0. Stated table facts for any future adoption:
+   `source_version BIGINT NOT NULL` (`:58`), `PRIMARY KEY (position_id)` (`:62`), `bucket.num=8`
+   (`:64`), schema v2.
+
+### Decisions
+
+- **D1 — `Positions`: do not adopt the merge engine now.** The precondition to record is "wire a
+  producer, then prove one version space per key", not "compare the two writers".
+- **D2 — `Position_State`: adopt, but file the record when it is implemented** (CHG-548 is the
+  harness flag fix; the next free number is used at implementation time). The table recreate is
+  held for Block 3 so one window covers it together with the combined levers. Be plain about the
+  value: single writer, zero readers, index-only table today, so this is defence-in-depth for a
+  future producer — not a fix for an observable bug. Deprioritising it is a legitimate call.
+- **D3 — the unwired guarded writer stays unwired and gets labelled.** `PositionProjectionWriter` /
+  `PostbackProjectionDriver` remain test-only oracles until a producer exists; wiring them now would
+  add a path production cannot exercise, and deleting them would drop the differential oracle.
+  Recorded here so it stops looking like dead code awaiting deletion.
+- **D4 — the stale `10_positions.sql` enforcement prose is a docs-only fix candidate** (no
+  behaviour change), not done in this block.
