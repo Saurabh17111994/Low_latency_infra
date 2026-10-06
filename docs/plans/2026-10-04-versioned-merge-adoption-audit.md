@@ -103,7 +103,7 @@ Defer.
 
 1. **Docs only, no risk (~15 min):** fix the runbook SQL and the two stale `29_position_state.sql`
    claims.
-2. **Adopt the engine on `Position_State` (CHG-548, ~1-2 h):** the CHG-547 shape — DDL
+2. **Adopt the engine on `Position_State` (a new CHG, ~1-2 h):** the CHG-547 shape — DDL
    `table.merge-engine`/`ver-column='source_version'`, `DdlBootstrap` descriptor,
    `schema_manifest.json`, a `TableContractValidator` assertion that fails closed, one focused test,
    and a table-recreate window. Only writer is the gateway, no readers to coordinate.

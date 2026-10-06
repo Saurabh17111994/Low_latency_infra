@@ -967,9 +967,17 @@ decoupled gateway switch, daily-runner refusal) and
 > (today it is a NullSink), so a substitute `gate_safety_halt` rule would be a
 > second dead rule.
 
-**Scope:** instrument_token (16 buckets, Fluss `Position_State` KV PK exactly `[instrument_token]`, `bucket.key=instrument_token`). **Severity:** Warning → Critical if trading blocked. **Owner:** Trading Ops + Execution Gateway owner (Nautilus). **Gate impact:** SignalJob suppresses next signal for that instrument forever until `Position_State.status=CLOSED` or `ADMIN_CLEAR` arrives (no TTL, `ValueState` survives restarts/checkpoints). Intentional stuck = liveness cost for correctness.
+**Read this before the body (corrected 2026-10-04).** Two things below are stale and
+would mislead if followed: the key is now composite —
+`[account_scope_id, instrument_token]`, `bucket.key=instrument_token` (P4-005 v2) — and
+there is no consumer left, so an `ADMIN_CLEAR` row clears no Flink state and the
+`compute.signal.*` / `trading_alerts` verification steps (3–4 below) cannot fire. The SQL
+is corrected to the v2 schema so it would at least execute. Treat the body as design
+evidence; write a break-glass row only as durable audit state, never as a control action.
 
-**Preconditions:** `ActiveSignalFeedbackFunction` is live (`SignalJob` CoProcess: Input1 signals, Input2 `Position_State` changelog `OffsetsInitializer.full()`). `TableContractValidator` passed (PK/bucket/schema). `flink-metrics-otel` -> `otel-collector:4318/v1/metrics` -> `metrics` + `ComputeAlertLogs` -> `trading_alerts` healthy.
+**Scope:** per instrument, keyed by `(account_scope_id, instrument_token)` — 16 buckets, Fluss `Position_State` KV PK exactly `[account_scope_id, instrument_token]`, `bucket.key=instrument_token` (P4-005 v2). **Severity:** Warning → Critical if trading blocked. **Owner:** Trading Ops + Execution Gateway owner (Nautilus). **Gate impact:** *(retired)* SignalJob suppresses next signal for that instrument forever until `Position_State.status=CLOSED` or `ADMIN_CLEAR` arrives (no TTL, `ValueState` survives restarts/checkpoints). Intentional stuck = liveness cost for correctness.
+
+**Preconditions:** *(retired — none of these exist any more)* `ActiveSignalFeedbackFunction` is live (`SignalJob` CoProcess: Input1 signals, Input2 `Position_State` changelog `OffsetsInitializer.full()`). `TableContractValidator` passed (PK/bucket/schema). `flink-metrics-otel` -> `otel-collector:4318/v1/metrics` -> `metrics` + `ComputeAlertLogs` -> `trading_alerts` healthy.
 
 **Signals and evidence queries:**
 - Dashboard `Position State — Max-One-Active` (4 panels): gauge `compute.signal.active.count` stuck high; bar `dropped` rate high + `passed` zero for instrument; `cleared` zero for 30m+; table `trading_alerts` shows no `active-signal-cleared` for that token.
@@ -990,12 +998,21 @@ decoupled gateway switch, daily-runner refusal) and
 
 **Recovery (ADMIN_CLEAR break-glass):**
 1. Obtain approved ticket; this path requires explicit approval (audit trail in `trading_alerts`).
-2. Write exactly one row to `Position_State` with the instrument's key:
+2. Write exactly one row to `Position_State` with the instrument's key. v2 columns
+   (`account_scope_id` is part of the PK and `source_version` is NOT NULL, both since
+   P4-005 v2 — the pre-v2 statement that omitted them could no longer execute):
    ```sql
-   INSERT INTO Position_State (instrument_token, status, position_id, updated_ts, closed_ts, closed_reason, schema_version)
-   VALUES (<instrument_token>, 'ADMIN_CLEAR', NULL, <now_ms>, <now_ms>, 'RB-POS-001 ticket=<id> reason=<text>', 'v1');
+   INSERT INTO Position_State (account_scope_id, instrument_token, status, position_id,
+                              updated_ts, closed_ts, closed_reason, source_version, schema_version)
+   VALUES (<account_scope_id>, <instrument_token>, 'ADMIN_CLEAR', NULL,
+           <now_ms>, <now_ms>, 'RB-POS-001 ticket=<id> reason=<text>', <now_ms>, '2');
    ```
-   Writer MUST be the Execution Gateway path (owner of the table); direct Fluss writes are break-glass only and must still be replicated to the lake (lake enabled, 5m Iceberg commit). `ADMIN_CLEAR` follows the same `STATUS_ADMIN_CLEAR` branch as `CLOSED` in the CoProcess and decrements the gauge.
+   Today the write is a blind last-write-wins upsert, so any `source_version` lands.
+   Once the versioned-merge engine is adopted on this table (planned; not yet filed or
+   applied) an older `source_version` is ignored by the tablet, which would make a
+   `<now_ms>` value wrong whenever the instrument's last write used a larger clock —
+   the break-glass row would then have to read the stored row and exceed its version.
+   Writer MUST be the Execution Gateway path (owner of the table); direct Fluss writes are break-glass only and must still be replicated to the lake (lake enabled, 5m Iceberg commit). *(retired)* `ADMIN_CLEAR` followed the same `STATUS_ADMIN_CLEAR` branch as `CLOSED` in the CoProcess and decremented the gauge; that CoProcess was deleted in `0f3e5952`, so today the row changes no compute state.
 3. Wait for changelog delivery: Flink log `active-signal-feedback: ADMIN_CLEAR … clearing active` and metric `compute.signal.cleared.admin` + `trading_alerts` `WARN active-signal-admin-clear` within 30s (depends on Fluss commit + changelog poll). If not seen in 2m, check Fluss coordinator/TabletServer and Flink input2 lag.
 4. Verify next signal for that token can now pass: dashboard `passed` increments on next trigger; or force a test signal in dev.
 

@@ -326,7 +326,7 @@
     {
       "table_name": "Position_State",
       "ddl_path": "29_position_state.sql",
-      "ddl_sha256": "7947608cf8fab1e54a604d3178c766dc4bba52e382bf8121fd686f0b34b54827",
+      "ddl_sha256": "13f62715b820679b345b0e1cc2fb7a760e3106ff84c7b7fc157e14fd7434d896",
       "table_kind": "KV",
       "primary_key": "account_scope_id, instrument_token",
       "bucket_key": null,

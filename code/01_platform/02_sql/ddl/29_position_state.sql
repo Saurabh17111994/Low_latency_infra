@@ -20,14 +20,23 @@
 -- lifecycle (OPEN vs CLOSED) is owned by the execution layer (Nautilus
 -- confirms broker fill/exit). Fluss Position_State is the handshake:
 -- Flink writes signal → Nautilus reads → broker → Nautilus UPSERTS
--- CLOSED. Flink's ActiveSignalFilter watches this table's LOG changelog
--- (via a second Fluss source) and clears its per-instrument ACTIVE
--- block only on CLOSED. No TTL — block is indefinite until CLOSED,
+-- CLOSED. No TTL — block is indefinite until CLOSED,
 -- survives restarts (checkpointed + durable KV). TTL would risk duplicate
 -- while broker position still open.
 --
--- Status contract (P4-088 v2 — Fluss has no CHECK; enforced in gateway +
--- ActiveSignalFeedbackFunction + startup check): status OPEN | CLOSED |
+-- Consumer status (2026-10-04): the reading half is gone. The Flink
+-- ActiveSignalFeedbackFunction that watched this table's LOG changelog (via a
+-- second Fluss source) and cleared its per-instrument ACTIVE block on CLOSED
+-- was retired in 0f3e5952 with the rest of the active-signal subsystem. The
+-- gateway's FlussProjectionWriter is the only writer now, and nothing in the
+-- pipeline reads this row back — an ADMIN_CLEAR written today is durable state
+-- for audit/reconciliation, not a control action (RB-POS-001 is historical).
+--
+-- Status contract (P4-088 v2 — Fluss has no CHECK; the surviving enforcement is
+-- the gateway writer, which throws on any state outside OPEN/CLOSED/FLAT —
+-- FlussProjectionWriter.positionStateRow. The retired ActiveSignalFeedbackFunction
+-- (0f3e5952) was the other half; no startup check validates row values):
+-- status OPEN | CLOSED |
 -- ADMIN_CLEAR (exact, uppercase). CLOSED/ADMIN_CLEAR MUST set
 -- closed_ts+closed_reason; OPEN MUST leave them NULL. Unknown states are
 -- quarantined + halted, never defaulted to OPEN (a typo must not block an
