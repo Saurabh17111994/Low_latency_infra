@@ -1498,6 +1498,10 @@ public final class IngestionService {
             metrics.setAppendCounters(
                     tracker.totalAccepted(), tracker.totalAppended(),
                     tracker.totalFailed(), tracker.totalRejected());
+            // OQ9 second instrument (CHG-555): the writer's own in-flight and
+            // terminal counters, read from the same per-tick site. Two
+            // AtomicLong gets; no new hot-path work beyond that.
+            metrics.setWriterCounters(writer.writesInFlight(), writer.writesCompleted());
             metrics.setIngestionReady(health.isReady());
             metrics.setBridgeConnected(true);
             refreshResourceMetrics();

@@ -180,6 +180,14 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
     /** Per-window peak of {@link #pendingRecords}; reset by every flush. */
     private volatile long pendingRecordsMax;
 
+    // ---- Writer-funnel counters (OQ9 second instrument, CHG-555) ----
+    // RawTickWriter's own in-flight/terminal pair. Same population as
+    // AppendTracker's pending/appended, but counted inside the submit and
+    // complete funnel instead of at accept/release, so reading both in one arm
+    // localises which instrument disagrees with the other.
+    private volatile long writerInFlight;
+    private volatile long writerCompleted;
+
     // ---- Reason counters ----
     private final ConcurrentMap<String, AtomicLong> decodeReasonCounters = new ConcurrentHashMap<>();
 
@@ -361,6 +369,15 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
         this.appendAppendedTotal = appended;
         this.appendFailedTotal = failed;
         this.appendRejectedTotal = rejected;
+    }
+
+    /**
+     * OQ9 second instrument (CHG-555): {@code RawTickWriter}'s own in-flight and
+     * terminal counters, read beside {@link #setAppendCounters} in the same arm.
+     */
+    public void setWriterCounters(long inFlight, long completed) {
+        this.writerInFlight = inFlight;
+        this.writerCompleted = completed;
     }
     public void incrementBridgeReconnects() { bridgeReconnects.incrementAndGet(); }
     public void setBridgeConnected(boolean v) { bridgeConnected = v ? 1 : 0; }
@@ -605,6 +622,11 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
         appendSum(sb, "append.appended.records", "records", appendAppendedTotal, now);
         appendSum(sb, "append.failed.records", "records", appendFailedTotal, now);
         appendSum(sb, "append.rejected.records", "records", appendRejectedTotal, now);
+        // OQ9 second instrument (CHG-555): the writer's own view of the same
+        // population. Compare against append.pending.records (tracker) and
+        // append.appended.records (tracker) above.
+        appendGaugeLong(sb, "append.inflight.records", "records", writerInFlight, now);
+        appendGaugeLong(sb, "append.completed.records", "records", writerCompleted, now);
         // Next window starts at the current level; the accept path may raise it
         // again between this line and its next read (a peak in that sub-ms gap
         // is dropped, never over-counted).

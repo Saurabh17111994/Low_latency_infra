@@ -761,6 +761,56 @@ class OtlpMetricsEmitterTest {
         }
     }
 
+    @Test
+    @DisplayName("OQ9 second instrument: the writer's own in-flight/terminal pair is exported")
+    void writerFunnelCounters() throws Exception {
+        OtlpMetricsEmitter emitter = new OtlpMetricsEmitter("127.0.0.1:1", "test-instance");
+        try {
+            // CHG-555: RawTickWriter counts the same population as AppendTracker
+            // but inside the submit/completion funnel itself. An arm reads these
+            // two gauges next to `append.pending.records`:
+            //   * writer in-flight ~0 while pending stays ~600 => the tracker's
+            //     release path is unbalanced and the tracker gauge is wrong;
+            //   * the two agree => the tracker is right, and the histogram count
+            //     (which tracks ticks, not completions) is the broken one.
+            emitter.setWriterCounters(15, 1185);
+
+            String json = emitter.buildMetricsJson();
+            long inFlight = metricByName(json, "append.inflight.records")
+                    .path("gauge").path("dataPoints").get(0).path("asInt").asLong();
+            long completed = metricByName(json, "append.completed.records")
+                    .path("gauge").path("dataPoints").get(0).path("asInt").asLong();
+
+            assertEquals(15, inFlight, "writer in-flight gauge carries the latest value");
+            assertEquals(1185, completed, "writer terminal count carries the latest value");
+        } finally {
+            emitter.close();
+        }
+    }
+
+    @Test
+    @DisplayName("OQ9 probe: the append histogram count tracks recorded samples, not ticks")
+    void appendHistogramCountTracksSamples() throws Exception {
+        OtlpMetricsEmitter emitter = new OtlpMetricsEmitter("127.0.0.1:1", "test-instance");
+        try {
+            for (int i = 0; i < 5; i++) {
+                emitter.recordTick(10);
+            }
+            for (int i = 0; i < 3; i++) {
+                emitter.recordAppendLatencyMs(7);
+            }
+            String json = emitter.buildMetricsJson();
+            long ticks = sumByName(json, "tick.throughput");
+            long samples = metricByName(json, "append.latency.ms")
+                    .path("histogram").path("dataPoints").get(0).path("count").asLong();
+            assertEquals(5, ticks, "tick counter counts recordTick calls");
+            assertEquals(3, samples,
+                    "histogram count must count recordAppendLatencyMs samples, not ticks");
+        } finally {
+            emitter.close();
+        }
+    }
+
     private static JsonNode metricByName(String json, String name) throws Exception {
         JsonNode metrics = new ObjectMapper().readTree(json)
                 .at("/resourceMetrics/0/scopeMetrics/0/metrics");

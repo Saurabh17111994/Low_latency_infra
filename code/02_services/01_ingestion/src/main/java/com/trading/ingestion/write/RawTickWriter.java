@@ -66,6 +66,21 @@ public final class RawTickWriter implements AutoCloseable {
     private final AtomicLong appendCount = new AtomicLong(0);
     private final AtomicLong errorCount = new AtomicLong(0);
     private final AtomicLong uncertainCount = new AtomicLong(0);
+    /**
+     * OQ9 second instrument (CHG-555). The 2026-10-07 arm proved the tracker's
+     * own arithmetic is exact (accepted - appended - failed == pending at 9/9
+     * flushes) while its pending level (~600) could not be reconciled with the
+     * same run's latency histogram (~13 ms mean). These two counters measure
+     * the same population from inside the submit/completion funnel, so an arm
+     * can say which of the two instruments is wrong.
+     *
+     * <p>In-flight is incremented on the FIRST submit attempt only: a retry
+     * re-submits the same record and must not be counted twice. Both are
+     * updated exactly once per record in {@link #completeOutcome}, the single
+     * funnel every terminal outcome passes through.
+     */
+    private final AtomicLong writesInFlight = new AtomicLong(0);
+    private final AtomicLong writesCompleted = new AtomicLong(0);
     /** Wall-clock epoch (ms) of the last SUCCESS ack. 0 = none yet. Feed for
      *  the zero-ack watchdog: a sustained absence of SUCCESS while the broker
      *  keeps sending indicates a wedged Fluss sender (append futures hang
@@ -195,6 +210,11 @@ public final class RawTickWriter implements AutoCloseable {
      * completion handling runs on the future's completing thread.
      */
     private void submitAppend(TickPacket packet, int rowBytes, Instant acceptTime, int attempt) {
+        // OQ9 (CHG-555): reserve the in-flight slot with the first attempt only —
+        // completeOutcome() releases it on the terminal outcome, whatever that is.
+        if (attempt == 1) {
+            writesInFlight.incrementAndGet();
+        }
         final CompletableFuture<AppendResult> future;
         try {
             future = rowConverter.append(packet);
@@ -358,6 +378,12 @@ public final class RawTickWriter implements AutoCloseable {
     }
 
     private void completeOutcome(AppendOutcome outcome) {
+        // OQ9 (CHG-555): the writer's own funnel counters. Deliberately OUTSIDE
+        // the shutdown gate below: a late completion after close() is not
+        // delivered to the listener, but it must still release its in-flight
+        // slot, or the two counters would drift apart from each other.
+        writesCompleted.incrementAndGet();
+        writesInFlight.updateAndGet(v -> Math.max(0L, v - 1));
         // P1-114: late completions landing after scheduler shutdown already
         // had their slots forgiven by forceDrain — deliver only while the
         // scheduler is alive, so a post-shutdown outcome can neither
@@ -380,6 +406,10 @@ public final class RawTickWriter implements AutoCloseable {
     }
 
     public long appendCount() { return appendCount.get(); }
+    /** OQ9 (CHG-555): records submitted (first attempt) but not yet terminal. */
+    public long writesInFlight() { return writesInFlight.get(); }
+    /** OQ9 (CHG-555): terminal outcomes this writer's funnel has produced. */
+    public long writesCompleted() { return writesCompleted.get(); }
     public long errorCount() { return errorCount.get(); }
     public long uncertainCount() { return uncertainCount.get(); }
     public long lastAppendSuccessEpochMs() { return lastAppendSuccessEpochMs; }
