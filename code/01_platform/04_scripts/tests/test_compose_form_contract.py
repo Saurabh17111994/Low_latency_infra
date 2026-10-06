@@ -184,6 +184,11 @@ SITES: list[tuple[str, str, str, str]] = [
      "docker compose up -d flink-taskmanager", "TEXT", "docstring prose"),
     ("code/01_platform/04_scripts/tests/test_strategy_context_submit_env.py",
      "docker compose exec -e", "TEXT", "docstring prose"),
+    # 2026-10-06: the topology-gate test's docstring quotes the submit client's
+    # compose form as prose while explaining the trap it guards (a flag reaches
+    # only the `flink run` client, so an unset flag silently drops operators).
+    ("code/01_platform/04_scripts/tests/test_stage_capture_topology_gate.py",
+     "docker compose exec -T -e ...", "TEXT", "docstring prose"),
 ]
 
 # Compose variables: the definitions this test trusts (checked by test_definitions).
