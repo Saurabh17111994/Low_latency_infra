@@ -714,4 +714,66 @@ class OtlpMetricsEmitterTest {
             emitter.close();
         }
     }
+
+    @Test
+    @DisplayName("OQ9: append identity counters reconcile with the pending gauge")
+    void appendIdentityCounters() throws Exception {
+        OtlpMetricsEmitter emitter = new OtlpMetricsEmitter("127.0.0.1:1", "test-instance");
+        try {
+            // The tracker's own identity at any instant is
+            //   totalAccepted - totalAppended - totalFailed == pendingRecords
+            // (totalRejected counts gate refusals, which were never counted as
+            // accepted). Exporting the four counters is what lets an arm check
+            // that instead of trusting the gauge.
+            emitter.setAppendCounters(1200, 990, 30, 7);
+            emitter.setPendingRecords(120);
+            emitter.setPendingRecords(300);
+            emitter.setPendingRecords(180);
+
+            String json = emitter.buildMetricsJson();
+            long pending = metricByName(json, "append.pending.records")
+                    .path("gauge").path("dataPoints").get(0).path("asInt").asLong();
+            long peak = metricByName(json, "append.pending.records.max")
+                    .path("gauge").path("dataPoints").get(0).path("asInt").asLong();
+            long accepted = sumByName(json, "append.accepted.records");
+            long appended = sumByName(json, "append.appended.records");
+            long failed = sumByName(json, "append.failed.records");
+            long rejected = sumByName(json, "append.rejected.records");
+
+            assertEquals(180, pending, "gauge carries the latest value");
+            assertEquals(300, peak, "window peak must survive lower readings");
+            assertEquals(1200, accepted);
+            assertEquals(990, appended);
+            assertEquals(30, failed);
+            assertEquals(7, rejected);
+            assertEquals(pending, accepted - appended - failed,
+                    "accepted - appended - failed must equal the pending gauge");
+
+            // Second window: the peak is reset to the current level, so a stale
+            // high-water mark cannot follow the run forever.
+            emitter.setPendingRecords(200);
+            String second = emitter.buildMetricsJson();
+            assertEquals(200, metricByName(second, "append.pending.records.max")
+                    .path("gauge").path("dataPoints").get(0).path("asInt").asLong(),
+                    "window peak resets every flush");
+        } finally {
+            emitter.close();
+        }
+    }
+
+    private static JsonNode metricByName(String json, String name) throws Exception {
+        JsonNode metrics = new ObjectMapper().readTree(json)
+                .at("/resourceMetrics/0/scopeMetrics/0/metrics");
+        for (JsonNode metric : metrics) {
+            if (metric.path("name").asText().equals(name)) {
+                return metric;
+            }
+        }
+        throw new AssertionError("metric not found in payload: " + name);
+    }
+
+    private static long sumByName(String json, String name) throws Exception {
+        return metricByName(json, name).path("sum").path("dataPoints").get(0)
+                .path("asInt").asLong();
+    }
 }

@@ -1491,6 +1491,13 @@ public final class IngestionService {
             health.setSlotFrameReceived(ev.getSlotId(), tickNanos);
             metrics.setPendingRecords(tracker.pendingRecords());
             metrics.setPendingBytes(tracker.pendingBytes());
+            // OQ9: cumulative accept/complete counters, so the pending gauge
+            // can be checked against the tracker's own identity instead of
+            // being taken on trust (accessors already existed; reads only,
+            // no new hot-path work beyond four AtomicLong gets).
+            metrics.setAppendCounters(
+                    tracker.totalAccepted(), tracker.totalAppended(),
+                    tracker.totalFailed(), tracker.totalRejected());
             metrics.setIngestionReady(health.isReady());
             metrics.setBridgeConnected(true);
             refreshResourceMetrics();

@@ -163,6 +163,23 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
     private volatile long connectionEpoch;
     private volatile int ingestionReady; // 0 or 1
 
+    // ---- Append identity counters (OQ9, 2026-10-06) ----
+    // The pending gauge alone cannot say WHERE ~500 in-flight records come
+    // from. AppendTracker already counts every accept/append/fail/reject, so
+    // exporting those cumulative counters lets an arm test the tracker's own
+    // identity at each flush:
+    //     accepted - appended - failed == pending.records
+    // If it holds, the pending gauge is truthful and the records really are
+    // in flight (so the latency histograms are not seeing them); if it breaks,
+    // the gauge over-counts. Sampling the same gauge faster cannot tell those
+    // two apart; this can.
+    private volatile long appendAcceptedTotal;
+    private volatile long appendAppendedTotal;
+    private volatile long appendFailedTotal;
+    private volatile long appendRejectedTotal;
+    /** Per-window peak of {@link #pendingRecords}; reset by every flush. */
+    private volatile long pendingRecordsMax;
+
     // ---- Reason counters ----
     private final ConcurrentMap<String, AtomicLong> decodeReasonCounters = new ConcurrentHashMap<>();
 
@@ -325,8 +342,26 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
         }
     }
 
-    public void setPendingRecords(long v) { this.pendingRecords = v; }
+    public void setPendingRecords(long v) {
+        this.pendingRecords = v;
+        // Window peak (OQ9): a bursty drain peaks well above the 10s gauge
+        // reading, a stuck set sits flat at the same value every window.
+        if (v > pendingRecordsMax) {
+            pendingRecordsMax = v;
+        }
+    }
     public void setPendingBytes(long v) { this.pendingBytes = v; }
+
+    /**
+     * Cumulative append-identity counters from {@code AppendTracker} (OQ9).
+     * Called from the same per-tick site as {@link #setPendingRecords(long)}.
+     */
+    public void setAppendCounters(long accepted, long appended, long failed, long rejected) {
+        this.appendAcceptedTotal = accepted;
+        this.appendAppendedTotal = appended;
+        this.appendFailedTotal = failed;
+        this.appendRejectedTotal = rejected;
+    }
     public void incrementBridgeReconnects() { bridgeReconnects.incrementAndGet(); }
     public void setBridgeConnected(boolean v) { bridgeConnected = v ? 1 : 0; }
     public void setManifestVersion(long v) { manifestVersion = v; }
@@ -563,6 +598,17 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
         // Gauge: append.pending.records
         appendGaugeLong(sb, "append.pending.records", "records", pendingRecords, now);
         appendGaugeLong(sb, "append.pending.bytes", "bytes", pendingBytes, now);
+        appendGaugeLong(sb, "append.pending.records.max", "records", pendingRecordsMax, now);
+        // Cumulative identity counters (OQ9): accepted - appended - failed is
+        // expected to equal append.pending.records at every flush.
+        appendSum(sb, "append.accepted.records", "records", appendAcceptedTotal, now);
+        appendSum(sb, "append.appended.records", "records", appendAppendedTotal, now);
+        appendSum(sb, "append.failed.records", "records", appendFailedTotal, now);
+        appendSum(sb, "append.rejected.records", "records", appendRejectedTotal, now);
+        // Next window starts at the current level; the accept path may raise it
+        // again between this line and its next read (a peak in that sub-ms gap
+        // is dropped, never over-counted).
+        pendingRecordsMax = pendingRecords;
         appendGaugeInt(sb, "bridge.connected", "1", bridgeConnected, now);
         appendGaugeLong(sb, "manifest.version", "version", manifestVersion, now);
         appendGaugeLong(sb, "clock.offset.ms", "ms", clockOffsetMs, now);
