@@ -655,6 +655,25 @@ services:
         # start), which hides a 4min-TTL expiry for up to 5min. Probes render 30s for
         # their window only; the default and every revert stay upstream's 5min.
         log.retention.check-interval: ${FLUSS_RETENTION_CHECK_INTERVAL:-5min}
+        # CHG-551 (2026-10-06, Task 3e): the tablet's own request timing is the
+        # only server-side instrument on the append path. Fluss records
+        # requestQueueTimeMs / requestProcessTimeMs / responseSendTimeMs /
+        # totalTimeMs per request
+        # (org.apache.fluss.rpc.netty.server.RequestsMetrics — verified in
+        # fluss-server-1.0.0.jar), and fluss-metrics-prometheus ships in the
+        # image under /opt/fluss/plugins/prometheus, but no reporter is enabled
+        # by default, so an append's server-side split is invisible. A JFR
+        # trace of the tablet (2026-10-06, 900 s) showed no blocking, no lock
+        # contention and an empty request queue; a histogram is needed to
+        # quantify queue/process/response time instead of arguing from absence.
+        # Empty value = empty reporter list = exactly today's behaviour (the
+        # config parser was probed: "" -> [], no exception). The measurement
+        # arm sets FLUSS_METRICS_REPORTERS=prometheus and scrapes :9249 from
+        # inside the container. NOTE: metrics.reporter.prometheus.port is the
+        # plugin's own key (PrometheusReporterPlugin); it is not in the core
+        # ConfigOptions that the rest of server.yaml documents.
+        metrics.reporters: ${FLUSS_METRICS_REPORTERS:-}
+        metrics.reporter.prometheus.port: ${FLUSS_METRICS_PROMETHEUS_PORT:-9249}
         # Lake tiering (tracker 14 P3.2) — same datalake.* block as the
         # coordinator: datalake.iceberg.* → Iceberg catalog props,
         # iceberg.hadoop.* → Hadoop fs.s3a.* (R2). Credentials only via .env.
