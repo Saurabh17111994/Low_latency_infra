@@ -716,6 +716,7 @@ pipeline_start_ingestion() {
     -e CLOCK_CHECK_REQUIRED=false \
     -e OTEL_COLLECTOR_HOST=otel-collector:4318 \
     -e FLUSS_WRITER_MODE=generic -e FLUSS_WRITERS=1 -e FLUSS_WRITER_BATCH_SIZE_BYTES=0 \
+    -e FLUSS_CLIENT_METRICS_ENABLED="${FLUSS_CLIENT_METRICS_ENABLED:-false}" \
     "$LIB_LOADGEN_IMAGE" \
     java --add-opens=java.base/java.nio=ALL-UNNAMED \
       -Xms512m -Xmx512m -XX:MaxDirectMemorySize=512m \

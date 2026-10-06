@@ -82,6 +82,12 @@ public final class ConfigKeys {
     public static final String FLUSS_WRITER_BATCH_SIZE_BYTES = "FLUSS_WRITER_BATCH_SIZE_BYTES";
     public static final String FLUSS_WRITER_BATCH_TIMEOUT_MS = "FLUSS_WRITER_BATCH_TIMEOUT_MS";
     public static final String FLUSS_WRITER_MODE = "FLUSS_WRITER_MODE";
+    /**
+     * Task 3b (2026-10-06): turn on the Fluss client's own metrics (default
+     * false — the SDK collects nothing unless asked). Measurement-only knob for
+     * splitting accept→ack into batch-queue wait vs send+server+response.
+     */
+    public static final String FLUSS_CLIENT_METRICS_ENABLED = "FLUSS_CLIENT_METRICS_ENABLED";
     public static final String FLUSS_WRITER_RETRIES = "FLUSS_WRITER_RETRIES";
     public static final String GO_ARROW_SDK_VERSION = "GO_ARROW_SDK_VERSION";
     public static final String HOSTNAME = "HOSTNAME";

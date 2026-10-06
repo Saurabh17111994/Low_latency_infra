@@ -247,7 +247,9 @@ anchor, `code/01_platform/02_sql/ddl/02_raw_table_1.sql`), `Signal_Candidates_cu
 | OQ4 | Is the ~65–69 ms L7 gap on the Fluss side (reader visibility) or inside the Flink source (read→emit batching)? | which repository the fix lives in | **Answered 2026-10-06 (Task 3a): not Fluss-side** — a plain reader sees a record 9 ms p50 after `ingest_ts` (2 ms floor) while the source polls every 2.1 ms with 0 records lag, so the remaining ~55 ms sits between the source's fetch and its emission (Task 3b) |
 | OQ5 | S11 (`closeread.tsv` window-close → first read, declared SLO p99 ≤ 75 ms) measures 1 258–9 576 ms with 100 % of windows "violating" — but the sampler only polls every ~17 s, so can this path measure 75 ms at all? | whether a declared SLO is verifiable by the current instrument | measurement track (M-items) |
 | OQ6 | Did the C0e aggregator p99 hop (+40.6 ms) have a cause, or was it one run's tail? Task 1's two arms measured +1.3/+2.3 ms on the same config, so the standing term is gone — decide whether to re-open it only if it recurs | whether F4/hop work is still motivated | operator / Task 4 |
-| OQ7 | The 64 MB writer buffer pool, the pinned 64 KiB batch, the 1 ms linger and per-record submits produce ~1 600 requests/s per ingestion JVM (`FlussClientAdapter.connect()`). **Which sub-interval of accept→ack owns the ~55–62 ms p99**: pool wait, Sender queue, send/RTT, server append, or response handling? Also: what exactly does `append.pending.records` (standing 530–776) count? | which knob (if any) is worth an arm, and whether the read-side program can reach PT1 at all | **Task 3b** |
+| OQ7 | The 64 MB writer buffer pool, the pinned 64 KiB batch, the 1 ms linger and per-record submits produce ~1 600 requests/s per ingestion JVM (`FlussClientAdapter.connect()`). **Which sub-interval of accept→ack owns the ~55–62 ms p99**: pool wait, Sender queue, send/RTT, server append, or response handling? Also: what exactly does `append.pending.records` (standing 530–776) count? | which knob (if any) is worth an arm, and whether the read-side program can reach PT1 at all | **Partly answered 2026-10-06 (Task 3d, zero-code)**: pool wait ≈ 0 (`bufferWaitingThreads` 0, pool never below 65.5 MB of 64 MiB), the JVM never blocks (`submitAppend` 3 events/976 s, `JavaMonitorEnter` 2 events total), and the Sender's long waits belong to *idle* clients (3 threads × 100 ms timeouts = 99.3 % of wall). A **second client on the same tablet** measures the same-scale round trip in the same windows (`sendLatencyMs` p50 2 / p90 18–29 / max 91–97) ⇒ **the dominant share is the RPC/tablet round trip, not our queue** (an earlier claim here that the tablet's own histogram read p99 38–68 ms was wrong — that number is our own client's histogram). **Server side answered 2026-10-06 (Task 3e)**: the tablet's own `produceLog` histogram reads **p99 ≈1 ms** (queue/process/response-send all 1 ms), so the server processor is not the term either; ~10–20 ms sits outside both instruments. **Answered 2026-10-06 (Task 3b, option A arm)**: the client's own split is `writer.batchQueueTimeMs` p50 **8** (6-31) + `writer.sendLatencyMs` p50 **0** (max 2) + tablet p99 ~1 ms, so the term is **the wait between accept and send** - not the network, not the server. The client exports only instantaneous `Value` for those families (percentiles exist only for `bytesPerBatch`/`recordsPerBatch`), so the p99 of the queue stays unmeasured and our `append.latency.ms` p99 remains the only tail instrument. `append.pending.records`: see OQ9 | **closed (Task 3b)** |
+| OQ8 | Why does the tablet count only **22.4 `produceLog` requests/s** (~270 records, ~137 KB each) for ~4.9k rows/s while our client acks **1 622 appends/s** per JVM? The counted requests cannot be our per-record submits, and a ~137 ms coalescing cycle per client would contradict the measured accept→ack p50 of 9–10 ms | whether the client's own accept→ack is the write-path interval at all, and whether the tail is pre-send or post-response | **2026-10-06: the first attempt is VOID** — `RATE_HZ=0.2` never started the fleet (faketool `-real-rate-hz` must divide 1000; log `[pipeline FATAL] faketool container not ready in 15s`), so the `l1cycle` TSV is background noise. **Correction to this row's own premise**: the "~643 batches/s per JVM" figure was wrong — `stage.batching_latency` 643/s is the subset of ticks with a non-negative `batchCreatedMs − goEmitMs`, because `OtlpMetricsEmitter.recordStageLatencyMs` (`:317-325`) silently drops negative samples; the app has **no** batch-size instrument. **Closed 2026-10-06 (Task 3b)**: nothing was wrong - the batch count was. Client batches are **19.8 records / 11.7 KB** (1 622 rows/s ÷ 19.8 ≈ 82 batches/s per JVM) and a 137 KB request carries ~11.7 of them, so 82 ÷ 11.7 ≈ **7 req/s per JVM ≈ 21 req/s fleet** = the tablet's 22.4 req/s. The ~86-batches-per-request / ~137 ms-coalescing contradiction came entirely from the bogus 643/s batch rate (OtlpMetricsEmitter drops negative samples). The planned rate-scaling arm is **not needed**. Unrelated oddity: the client's own `requestsPerSecond_avg` reads 1 041/s (max 2 046) - do not quote it as a request rate |
+| OQ9 | **`append.pending.records` contradicts the same population's histogram.** `AppendTracker.pendingRecords` is a true in-flight gauge (`tryAccept` +1 :115-116, `onAppendSuccess`/`onAppendFailure` −1 :191-200, only bulk zero = shutdown `forceDrain()` :212-218, sampled per tick at `IngestionService.java:1491`). Little's law on one arm: pending median **534** at λ **1 622/s** ⇒ mean residence **≈329 ms**, versus the same run's `append.latency.ms` p50 9–13 / p99 16–32 / cumulative mean 22–25 ms | whether any reading of "write-path backlog" from this gauge is usable, and whether a sub-1 % population of appends hangs for tens of seconds (invisible at p99, but it would inflate both the mean and the in-flight count) | needs per-record data or a client-side instrument; the same "two lines + rebuild" change that would export the client's own `batchQueueTimeMs`/`sendLatencyMs`/`recordsPerBatch` (Task 3b(ii)) can carry a hang-time histogram. **Update 2026-10-06 (Task 3b arm)**: the new gauges do not explain it either - pending stays 564-610 per JVM (~0.36 s residence) while `requestsInFlight_total` = 0, `bufferWaitingThreads` = 0 and `bufferAvailableBytes` is the *full* 64 MiB pool, so there is no backpressure. The discriminating test is now sampling pending at 1 s instead of 10 s: oscillation = bursty drain, constant = over-count in the tracker |
 
 ## Implementation Roadmap
 
@@ -407,15 +409,174 @@ scorers); evidence in `logs/tracker-14/`.
       earlier Task 3a conclusion (2026-10-06, same day) came from comparing a *p50* reader age (9 ms)
       against the *p99* KPI; the probe's own p99 was 38 ms (max 105–142), which already carried the
       write-path tail. Record: `logs/tracker-14/20261006-l7-write-path-attribution.md`.
-- [ ] **Task 3b (revised — the write path, not the source):** split L1's accept→ack into intervals we
-      can act on, using what the client already exposes plus one small histogram in our own writer:
-      (i) zero-code: probe the Fluss client jar for the writer-buffer keys and their defaults
-      (`client.writer.buffer.memory-size`/`page-size` — the repo relies on a "64MB pool" per the
-      `FlussClientAdapter.connect()` comment) and establish what `append.pending.records` counts;
-      (ii) one change in `code/02_services/01_ingestion/`: histogram the pool/buffer wait
-      (`RawTickWriter.submitAppend` entry → return) separately from send→ack, beside the existing
-      `append.latency.ms`. Then decide whether the lever is a client knob (batch/pool sizing) or a
-      tablet/write-path item. Nothing in this task touches the DAG.
+- [x] **Task 3b (done 2026-10-06 — read the client's own instruments before adding any; arm run
+      `logs/stage-profile-clientmetrics-1006-232336`, fleet-only 300 s, 3 × 1 622 rows/s, record
+      `logs/tracker-14/20261006-task3b-client-metrics-arm.md`):** the Fluss
+      client already measures the intervals we need. `org.apache.fluss.client.metrics.WriterMetricGroup`
+      sets `batchQueueTimeMs` (a row's wait in the writer's batch queue) and `sendLatencyInMs`;
+      `MetricNames` also carries `eventQueueSize`/`eventQueueTimeMs`, `bufferAvailableBytes` /
+      `bufferTotalBytes` / `bufferWaitingThreads`, `bytesPerBatch`, `recordsPerBatch`. **None of it is
+      published today**: `FlussClientAdapter.connect()` builds the client `Configuration`
+      (`code/02_services/01_ingestion/src/main/java/com/trading/ingestion/FlussClientAdapter.java:84-106`)
+      without any `metrics.*` key, and the only reporter plugin shipped in the client jar is JMX
+      (`META-INF/services/org.apache.fluss.metrics.reporter.MetricReporterPlugin` →
+      `org.apache.fluss.metrics.jmx.JMXReporterPlugin`; keys `metrics.reporters`,
+      `metrics.reporter.jmx.port`). Two delivery options, both "read what exists" — no new metric
+      definitions:
+      (a) **config-only JMX, proven 2026-10-06** — set `metrics.reporters=jmx` in the client
+      `Configuration` and **leave `metrics.reporter.jmx.port` unset**: the reporter then registers all
+      25 client MBeans (incl. `writer.batchQueueTimeMs`, `writer.sendLatencyMs`,
+      `writer.bufferAvailableBytes`/`TotalBytes`, `writer.bufferWaitingThreads`, `bytesPerBatch`,
+      `recordsPerBatch`) in the JVM's platform MBeanServer — no port, no RMI, no JVM flag.
+      Setting the port instead makes Fluss start its own RMI registry, which **fails on JDK 17**
+      (`IllegalAccessError … sun.rmi.registry.RegistryImpl` — `JMXServer$JmxRegistry` extends an
+      internal JDK class) unless the JVM also gets
+      `--add-exports=java.rmi/sun.rmi.registry=ALL-UNNAMED`; with that one flag the RMI route works
+      (25 MBeans readable over `service:jmx:rmi:///jndi/rmi://<host>:<port>/jmxrmi`), and a remote read
+      is possible with the *standard* JDK agent (`-Dcom.sun.management.jmxremote.port=…`,
+      authenticate/ssl off, `-Djava.rmi.server.hostname=<container>`) while Fluss's port stays unset.
+      ⇒ **recommended: leave the Fluss port unset and read the beans in-process (b)** — nativeness
+      without RMI, ports, published ports, or an internal-JDK flag.
+      (b) **in-process bridge** — one config value plus ~30 lines in the existing `OtlpMetricsEmitter`
+      flush reading `ManagementFactory.getPlatformMBeanServer()` (the writer gauges are registered
+      there by (a)) or `FlussConnection.getClientMetricGroup()`; no ports, no new dependency. They are
+      gauges (point values), so they attribute the tail (queue vs pool vs send) but do not by
+      themselves add a p99 series.
+      (i) **done 2026-10-06 (zero code):** defaults probed — `client.writer.buffer.memory-size` 64 MB,
+      `buffer.page-size` 128 KB, `buffer.per-request-memory-size` 16 MB (an allocation chunk, not a
+      per-request reservation), `max-inflight-requests-per-bucket` 5 (active: `enable-idempotence`
+      defaults true), `retries` Integer.MAX_VALUE, `acks` all — while our overrides stay linger 1 ms /
+      batch 64 KiB / dynamic batching off / wait-timeout 30 s. **Open contradiction:** the tracker's
+      `append.pending.records` (standing 119–790, mean 514 summed over 3 JVMs ⇒ ~103 ms mean residence
+      per JVM by Little's law) cannot be reconciled with `append.latency.ms` p50 24 / p99 62 ms in the
+      same windows; our emitter's percentiles come from a 1024-sample ring reset every 10 s (~0.6 s of
+      traffic at 1.6 k rows/s), so the client-side p99 is a *local* p99. Record:
+      `logs/tracker-14/20261006-write-path-native-instruments.md`.
+      (ii) export the client's own writer gauges (option a or b) and settle whether the lever is a client
+      knob (batch/pool sizing) or a tablet/write-path item. Nothing in this task touches the DAG.
+      (iii) **2026-10-06 addendum — the key that unlocks (a)/(b), and a hard contradiction to settle.**
+      `client.metrics.enabled` exists and defaults to **false** ("Enable metrics for client. When metrics
+      is enabled, the client will collect metrics and report by the JMX metrics reporter"), so our
+      ingestion client has never collected client metrics at all — that is why the accept→ack split is
+      invisible (the Flink connector's `fluss_client_*` series exist only because Flink enables it with
+      its own registry). Separately, the tablet-side numbers are internally consistent (8 035
+      `produceLog` requests carried the whole 1 GB / 3.06 MB/s at 137 KB ≈ 217 rows each) while the
+      client reports 9–13 ms per append — a batch needing ~137 ms to accumulate cannot be acked in
+      10 ms, so one instrument is wrong and only the client's own `batchQueueTimeMs`/`sendLatencyMs`/
+      `recordsPerBatch` can say which. `client.writer.*` appears in no DDL/table option (checked), so
+      `FlussClientAdapter`'s 1 ms pin is the only source of the linger.
+      (iv) **implemented 2026-10-06 (option A, operator-approved):** the bridge is written — new
+      `code/02_services/01_ingestion/src/main/java/com/trading/ingestion/telemetry/FlussClientMetrics.java`
+      (platform-`MBeanServer` reader for `org.apache.fluss.client.*`, numeric attributes only, 64-gauge
+      cap, empty map on any failure), `OtlpMetricsEmitter.flushInternal` emits them as
+      `fluss.client.<domain-tail>.<Attribute>` gauges, `FlussClientAdapter.connect(...)` gained a 6-arg
+      overload that sets `client.metrics.enabled=true` + `metrics.reporters=jmx` with **no port** (⇒
+      platform MBean server, no RMI, no JVM flag), and `FLUSS_CLIENT_METRICS_ENABLED` (default `false`)
+      is parsed in `IngestionConfig` (`:271`, mirrored `:407`), declared in `ConfigKeys:90`, and
+      forwarded by `code/01_platform/04_scripts/pipeline-lib.sh:719` +
+      `code/01_platform/06_stage_profiler/stage-profile.sh:313,374`. Change record
+      `docs/05_deployment/change-records/CHG-552.md`; contract test
+      `code/02_services/01_ingestion/src/test/java/com/trading/ingestion/telemetry/FlussClientMetricsTest.java`
+      (fake client MBeans ⇒ pins the domain-tail naming, numeric-only filtering and the empty-server
+      case). The flag is strict (`true`/`false` only — `1` fails config validation), so harnesses pass
+      `true`. **Arm result (2026-10-06):** `writer.batchQueueTimeMs` p50 **8** (6–31), `writer.sendLatencyMs`
+      p50 **0** (max 2), `requestLatencyMs` max 2, `recordsPerBatch.Median` **18** (mean 19.8),
+      `bytesPerBatch.Mean` **11.7 KB**, `recordSendPerSecond.Rate` 1 622, `bufferAvailableBytes` = the full
+      64 MiB pool, `bufferWaitingThreads` **0**, `requestsInFlight_total` **0**. ⇒ accept→ack is
+      **queue-dominated** (8–13 ms wait + 0–1 ms RTT + ~1 ms tablet), **OQ8 is closed** (82 batches/s per
+      JVM ÷ ~11.7 batches per 137 KB request ≈ 21 req/s fleet = the tablet's 22.4 req/s), and **OQ9 stays
+      open** (pending 564–610 still implies ~0.36 s residence against a 9–24 ms median). The client
+      exports **no percentile** for the latency families (only `Value`), so our `append.latency.ms` p99
+      remains the only tail instrument on the write path. **Side finding:** three identical JVMs in one
+      300 s window read `append.latency` p50 9 / 15.5 / 24 ms and p99 **17 / 44 / 56 ms** — the
+      per-instance spread is as large as the arm-to-arm spread, so client-tail comparisons below ~3× are
+      noise.
+      **Operational note (2026-10-06):** the stage-profile preflight **hard-fails** on a stale
+      loadgen image (`loadgen image is stale (image=… sources=…) — rebuild it before measuring`,
+      first attempt 23:09) and does *not* build it, so any arm that follows an ingestion code change
+      must run `make images` first — that is the sanctioned stamp/build/verify path
+      (`Makefile:327-331`), and it is what the client-metrics arm driver records in its header.
+- [x] **Task 3d (2026-10-06, done — zero code, zero cluster change; the "option 1" arm):** asked whether
+      the ~40–60 ms accept→ack p99 is a *shared* write-path effect (something every client of the tablet
+      sees) or an effect of the ingestion JVM itself. Answered from data already on disk — the three
+      900 s arms `logs/stage-profile-task1-noise-1006-120852-a{1,2}` and
+      `logs/stage-profile-20261004-101739` (C0b), their `main/stages/prom-*.txt`, `docker-stats.log`,
+      `io-latency.tsv`, the per-JVM OTLP in `main/capture/j1-*/java.out`, and the harness's own JFR
+      recordings `main/capture/ticks/sp-ingestion-{0,1,2}.jfr` (9.8 MB, 976 s each).
+      **Result: the ingestion JVM explains none of it, and a second client on the same tablet measures
+      the same order of tail.**
+      - The JVM never blocks on the write path: JFR (threshold 10 ms for park/monitor-wait) shows
+        `RawTickWriter.submitAppend` **3 events / 0.05 s total / max 20.9 ms** in 976 s,
+        `jdk.JavaMonitorEnter` **2 events in the whole recording** (no monitor contention), the 64 MB
+        writer pool untouched (`bufferWaitingThreads` 0) and only garbage-collection pauses above the
+        noise floor (`gc-summary.txt`: ingestion 11/21/6 events, max 19.2–30.2 ms; TM 104 events,
+        max 36.7 ms).
+      - The only long waits in the JVM belong to **idle** Fluss clients: three `fluss-write-sender-thread-1`
+        threads (ids 47/51/54) sit in `Sender.awaitNextReadyCheck` for **9 692 waits × 100.0 ms = 969 s
+        of the 976 s recording (99.3 %)**, each wait timing out at the 100 ms argument. The raw writer's
+        own sender never appears at that threshold, i.e. its waits are < 10 ms.
+      - **A different process writing a different table against the same tablet sees the same scale**:
+        the Flink job's own Fluss writers publish `writer_client_id_sendLatencyMs` — and
+        `Sender.setSendLatencyInMs(System.currentTimeMillis() - <send start>)` is recorded **in the
+        response handler**, i.e. it is the send→response round trip — at p50 **2** / p90 **18–29** /
+        max **91–97** ms in those same windows (n = 1 176 samples, a1 and a2). Their `batchQueueTimeMs`
+        is a flat p50 100 / max 103 ms because it simply tracks *their* configured 100 ms linger, and
+        their `bufferWaitingThreads` is 0.
+      - **Correction (2026-10-06, same day):** an earlier draft of this bullet claimed a *tablet-side*
+        append histogram reading p99 38–68 ms as corroboration. That figure is our **own client's**
+        histogram (`docs/plans/2026-10-03-p99-50ms-combined-plan.md:413`, labelled "client-observed";
+        the per-instance values on `main/stages/ingestion.tsv` are additionally summed over 3 JVMs), so
+        it is **not** independent server-side evidence and was removed as such. There is **no
+        server-side append-latency instrument** in the captured data today — supplying one is Task 3e.
+      - **No external signal co-moves with our tail**: Pearson r between the worst ingestion instance's
+        `append.latency.ms.p99` and, respectively, the Flink writers' `sendLatencyMs`
+        (+0.23 / +0.03 / +0.04), the Flink RPC median (−0.11 / +0.15 / +0.24), the scanner
+        `fetchLatencyMs` (+0.06 / +0.13 / +0.14), **tablet CPU ≈ 0.00** and **host `w_await_ms` ≈ 0.00**
+        (a1 / a2 / C0b, n ≈ 92 windows each). The median-split test agrees: in a1's slow windows the
+        tablet's CPU was *lower* (42.5 % vs 46.5 %), Flink writer send 19 vs 16 ms, scanner fetch 2 vs
+        2 ms, host w_await 0.7 vs 0.7 ms.
+      - The three ingestion JVMs are in phase in only **one of three** arms (a1 p99 r 0.85–0.92; a2
+        −0.19…+0.24; C0b r01 +0.93 but r02/r12 ≈ +0.3), and `append.pending.records` does not co-move
+        with anything (per-JVM r ≈ 0) — so the ~60 s wave is not a single shared periodic either.
+      ⇒ **Where the tail is born**: after decode/routing/batching, inside the writer episode
+      (`stage.decode_latency.p99` r +0.28/+0.39, `stage.routing_latency.p99` +0.19/+0.29,
+      `stage.batching_latency` ≈ 0, `stage.ipc_latency` all-zero series, while
+      `stage.fluss_submit_latency.p99` and `stage.fluss_ack_latency.p99` correlate **r = +1.00** — they
+      are the same `latencyMs` value fed to both stages at
+      `code/02_services/01_ingestion/src/main/java/com/trading/ingestion/IngestionService.java:1562-1563`),
+      and the dominant share of it is the RPC/tablet round trip, not our client's queue. **Measurement
+      correction:** `main/stages/ingestion.tsv` percentile rows are **summed across the three ingestion
+      JVMs**, so any p99 read from that file is ≈3× the per-instance value; per-instance p99 (raw OTLP)
+      is a1 54.5/53.8/33.4, a2 34.1/45.6/56.8, C0b 41.2/35.1/37.8 ms.
+      **Caveats**: JFR's 10 ms threshold hides short waits (the raw writer's sender loop is invisible);
+      the Flink writers linger at 100 ms, so their batch sizes are not ours (a strong hint, not proof);
+      our client's own `batchQueueTimeMs`/`sendLatencyMs` are still exported nowhere (Task 3b(ii)).
+      Record: `logs/tracker-14/20261006-write-path-option1-verdict.md`.
+- [x] **Task 3e (2026-10-06, done — server-side instrument supplied, zero platform code):** the tablet's
+      prometheus reporter plugin was enabled per-arm (`metrics.reporters: ${FLUSS_METRICS_REPORTERS:-}` +
+      `metrics.reporter.prometheus.port: ${FLUSS_METRICS_PROMETHEUS_PORT:-9249}`, CHG-551) and scraped
+      in-container during a fleet-only arm at ~4.9k rows/s (`logs/stage-profile-tabletmetrics-1006-214949`,
+      66 scrapes / 332 s). Result, `request="produceLog"` min/median/max ms: `totalTimeMs` **p99 1 / 1 /
+      5.9**, `requestQueueTimeMs` p99 1, `requestProcessTimeMs` p99 1, `responseSendTimeMs` p99 1 ⇒
+      **the tablet's queue + process + response-send is ~1 ms at p99**; queueing server-side is not the
+      tail (`fetchLogClient` 1.98 req/s, all other request names ≈0). The client in the same window reads
+      `append.latency.ms` p50 9–10 / p99 16–19 ms, so ~10–20 ms per append sits **outside** both
+      instruments — the server metric only covers `putRequest → response handed to netty`.
+      **New puzzle (OQ8)**: the tablet counts only **22.4 produceLog req/s** carrying ~270 records
+      (~137 KB, `requestBytes` p50) each, while our client acks ~1 622 appends/s per JVM. **Corrections
+      added 2026-10-06 after the follow-up read**: (i) the "~643 batches/s per JVM (~2.5 records/batch)"
+      figure first written here was **wrong** — `stage.batching_latency` 643/s is the subset of ticks with
+      a non-negative `batchCreatedMs − goEmitMs`, because `OtlpMetricsEmitter.recordStageLatencyMs`
+      (`:317-325`) drops negative samples, and the app exports no batch-size metric at all; (ii) the
+      planned `RATE_HZ=0.2` arm is **VOID** (faketool `-real-rate-hz` must divide 1000 — the fleet never
+      started), so OQ8 is still open at a valid rate (1/2/5/10/20/25/40/50); (iii) a new contradiction
+      **OQ9** — `append.pending.records` (a true in-flight gauge) reads ~534 against λ 1 622/s, i.e. a
+      ~329 ms mean residence that the same run's `append.latency.ms` p99 16–32 ms forbids.
+      **Cross-arm contrast**: our client's
+      own p99 is 16–19 ms fleet-only but 23–32.5 ms in job arms, i.e. running the SignalJob roughly
+      doubles our writer's tail while the tablet's own p99 stays ~1 ms — a job arm *with the reporter on*
+      would read server, client and KPI in one window and is the cheaper next step than a rebuild.
+      Record: `logs/tracker-14/20261006-task3e-tablet-server-side.md`.
 - [ ] Explain or discard the `read-lag.tsv` absolute delta (OQ2) and decide whether L6 markers are
       artifacts (OQ3); record both verdicts.
 

@@ -5,6 +5,7 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
@@ -605,11 +606,29 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
         appendGaugeLong(sb, "jvm.threads.live", "threads", jvmThreadsLive, now);
         appendGaugeInt(sb, "otel.collector.healthy", "1", otlpHealthy ? 1 : 0, now);
 
+        // Task 3b (2026-10-06): the Fluss client's own write-path gauges
+        // (batchQueueTimeMs vs sendLatencyMs vs the 64MB pool) when the client's
+        // JMX reporter is on (FLUSS_CLIENT_METRICS_ENABLED). Empty map when it
+        // is off, so this costs one MBean query per flush and emits nothing.
+        appendFlussClientGauges(sb, now);
+
         // Trim last comma
         sb.setLength(sb.length() - 1);
 
         sb.append("]}]}]}");
         return sb.toString();
+    }
+
+    /**
+     * One gauge per numeric attribute of the Fluss client's MBeans, named
+     * {@code fluss.client.<metric>.<attribute>} (e.g.
+     * {@code fluss.client.writer.batchQueueTimeMs.Value}). See
+     * {@link FlussClientMetrics} for why the reporter is JMX-without-port.
+     */
+    private void appendFlussClientGauges(StringBuilder sb, long timeNanos) {
+        for (Map.Entry<String, Double> e : FlussClientMetrics.snapshot().entrySet()) {
+            appendGaugeDouble(sb, "fluss.client." + e.getKey(), "1", e.getValue(), timeNanos);
+        }
     }
 
     private void computeLatencyPercentiles() {

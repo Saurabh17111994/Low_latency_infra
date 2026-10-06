@@ -310,6 +310,7 @@ start_fleet() {
       -e CLOCK_CHECK_REQUIRED=false \
       -e OTEL_COLLECTOR_HOST=otel-collector:4318 -e METRICS_LOCAL_LOG=1 \
       -e FLUSS_WRITER_MODE=generic -e FLUSS_WRITERS=1 -e FLUSS_WRITER_BATCH_SIZE_BYTES=0 \
+      -e FLUSS_CLIENT_METRICS_ENABLED="${FLUSS_CLIENT_METRICS_ENABLED:-false}" \
       -e ARROW_TICK_COUNTS=30 "$LIB_LOADGEN_IMAGE" \
       java --add-opens=java.base/java.nio=ALL-UNNAMED -Xms512m -Xmx512m \
         -XX:MaxDirectMemorySize=512m \
@@ -370,6 +371,7 @@ start_fleet() {
       -e ARROW_HFT_LATENCY_MS=50 -e CLOCK_CHECK_REQUIRED=false \
       -e OTEL_COLLECTOR_HOST=otel-collector:4318 -e METRICS_LOCAL_LOG=1 \
       -e FLUSS_WRITER_MODE=generic -e FLUSS_WRITERS=1 -e FLUSS_WRITER_BATCH_SIZE_BYTES=0 \
+      -e FLUSS_CLIENT_METRICS_ENABLED="${FLUSS_CLIENT_METRICS_ENABLED:-false}" \
       -e ARROW_TICK_COUNTS=30 "$LIB_LOADGEN_IMAGE" \
       java --add-opens=java.base/java.nio=ALL-UNNAMED -Xms512m -Xmx512m \
         -XX:MaxDirectMemorySize=512m \

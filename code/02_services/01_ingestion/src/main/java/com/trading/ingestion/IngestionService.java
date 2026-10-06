@@ -474,7 +474,8 @@ public final class IngestionService {
         FlussRowConverter converter = FlussClientAdapter.connect(
                 config.flussBootstrap, config.rawTableName,
                 config.flussWriterBatchTimeoutMs,
-                config.flussWriterBatchSizeBytes, writerMode);
+                config.flussWriterBatchSizeBytes, writerMode,
+                config.flussClientMetricsEnabled);
         LOG.info("ingestion: Fluss connected (bootstrap={}, table={})",
                 config.flussBootstrap, config.rawTableName);
 

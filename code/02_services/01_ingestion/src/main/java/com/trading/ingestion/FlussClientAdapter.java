@@ -77,6 +77,34 @@ final class FlussClientAdapter {
     static FlussRowConverter connect(String bootstrapServers, String tablePath,
                                       int writerBatchTimeoutMs, int writerBatchSizeBytes,
                                       WriterMode writerMode) {
+        return connect(bootstrapServers, tablePath, writerBatchTimeoutMs,
+                writerBatchSizeBytes, writerMode, false);
+    }
+
+    /**
+     * Task 3b (2026-10-06): connect with the Fluss client's own metrics on.
+     *
+     * <p>{@code client.metrics.enabled} defaults to <b>false</b> — the plain
+     * Java client collects nothing unless asked — so our writer gauges
+     * ({@code batchQueueTimeMs}, {@code sendLatencyMs}, the pool sizes) have
+     * never been exported, and the write-path tail could not be split into
+     * "batch-queue wait" vs "send + server + response".
+     *
+     * <p>{@code metrics.reporters=jmx} with <b>no</b>
+     * {@code metrics.reporter.jmx.port} is deliberate: the reporter then
+     * registers the beans in the JVM's platform MBeanServer (read in-process by
+     * {@code OtlpMetricsEmitter} via {@code FlussClientMetrics}). Setting the
+     * port makes Fluss start its own RMI registry, which JDK 17 refuses
+     * ({@code IllegalAccessError … sun.rmi.registry.RegistryImpl} is not
+     * exported) — so the port route needs an extra JVM flag and buys nothing
+     * for a same-process read.
+     *
+     * @param clientMetricsEnabled {@code FLUSS_CLIENT_METRICS_ENABLED}; false
+     *     keeps the historical client configuration byte-identical.
+     */
+    static FlussRowConverter connect(String bootstrapServers, String tablePath,
+                                      int writerBatchTimeoutMs, int writerBatchSizeBytes,
+                                      WriterMode writerMode, boolean clientMetricsEnabled) {
         LOG.info("fluss: connecting (bootstrap={}, table={}, mode={})",
                 bootstrapServers, tablePath, writerMode);
 
@@ -104,6 +132,14 @@ final class FlussClientAdapter {
         // append() parks the calling thread forever, stalling the whole
         // ingestion pipeline. 30s converts that park into a sync EOFException.
         conf.setString("client.writer.buffer.wait-timeout", "30s");
+
+        // Task 3b: only when asked — metrics collection costs allocations on the
+        // hot path, and the certified default stays untouched.
+        if (clientMetricsEnabled) {
+            conf.setString("client.metrics.enabled", "true");
+            conf.setString("metrics.reporters", "jmx");
+            LOG.info("fluss: client metrics enabled (jmx reporter, no port -> platform MBeanServer)");
+        }
 
         // 2. Create connection (P1-060: must be closed if later setup
         // fails — getTable/getTableInfo/createWriter all throw with the
