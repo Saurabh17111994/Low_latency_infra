@@ -34,7 +34,7 @@ PROBE_DIR = ROOT / "code/01_platform/04_scripts/fluss-probes"
 # probe sources are compiled, and the fixture legs need it on the same classpath.
 PROBES = ["FlussPrefixReader", "FlussReadLagProbe", "FlussKvProbe", "FlussRuleCounter",
           "FlussSignalLatency", "ProbeFixtureSeeder", "FlussReadabilityProbe",
-          "FlussTableStatsProbe"]
+          "FlussTableStatsProbe", "FlussVisibilityProbe"]
 INGESTION = ROOT / "code/02_services/01_ingestion"
 BOOTSTRAP = "localhost:9123"
 DEAD = "127.0.0.1:9"          # nothing listens here; connection refused, no wait

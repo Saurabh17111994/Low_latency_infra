@@ -75,7 +75,7 @@ admissible if it lands on a leg with an identified owner.
 | L4 | dedup → aggregator | p50 1.0–1.2 / p99 hop +1.3–2.3 (**C0e's +40.6 did not reproduce — OQ6**) | same | aggregator (state, keys, timers) |
 | L5 | aggregator → strategy host | p50 1.8–2.0 / p99 +2.0–3.5 | same | DAG transit |
 | L6 | sinks | p50 0–1, p99 538–777 (suspect) | same — **sparse-stream marker artifact, unproven** | sinks |
-| **L7** | **ack → record emitted by the Flink source** | **~65–69 ms p99 (measured on the Task 1 arms), unexplained** | **none today** | **unknown — this plan's first target** |
+| **L7** | **ack → record emitted by the Flink source** | **~65–69 ms p99 (measured on the Task 1 arms)**; Task 3a split: the Fluss-side half is **~9 ms p50, 2 ms floor** (independent reader), so the remainder is source-side (poll→emit) | `FlussVisibilityProbe` (Fluss half, landed); source-side half still uninstrumented | **source side — Task 3b** |
 
 Total in-DAG transit (L3–L5) is **~4 ms at p50**; the previous "3–5 hops × 10 ms buffer = 30–40 ms"
 model is dead at `BUFFER_TIMEOUT_MS=2`.
@@ -244,7 +244,7 @@ anchor, `code/01_platform/02_sql/ddl/02_raw_table_1.sql`), `Signal_Candidates_cu
 | OQ1 | Is PT1 (`ingest_to_strategy`, the only KPI valid on both feeds) the formal primary, with S1/PT1b and PT2 as supporting gates? | phase order and which number is reported at the end | operator |
 | OQ2 | Why does `read-lag.tsv` (`logEndSum` − source consumed) show a ~65k–95k record offset that grows, while the scanner reports `recordsLag = 0`? Is the probe's absolute value meaningful? | measurement validity for L2/L7 | Task 3 |
 | OQ3 | Are the sink latency markers (p99 538–777 ms) real or sparse-stream artifacts? | whether L6 is a target | Task 3 |
-| OQ4 | Is the ~65–69 ms L7 gap on the Fluss side (reader visibility) or inside the Flink source (read→emit batching)? | which repository the fix lives in | Task 3 |
+| OQ4 | Is the ~65–69 ms L7 gap on the Fluss side (reader visibility) or inside the Flink source (read→emit batching)? | which repository the fix lives in | **Answered 2026-10-06 (Task 3a): not Fluss-side** — a plain reader sees a record 9 ms p50 after `ingest_ts` (2 ms floor) while the source polls every 2.1 ms with 0 records lag, so the remaining ~55 ms sits between the source's fetch and its emission (Task 3b) |
 | OQ5 | S11 (`closeread.tsv` window-close → first read, declared SLO p99 ≤ 75 ms) measures 1 258–9 576 ms with 100 % of windows "violating" — but the sampler only polls every ~17 s, so can this path measure 75 ms at all? | whether a declared SLO is verifiable by the current instrument | measurement track (M-items) |
 | OQ6 | Did the C0e aggregator p99 hop (+40.6 ms) have a cause, or was it one run's tail? Task 1's two arms measured +1.3/+2.3 ms on the same config, so the standing term is gone — decide whether to re-open it only if it recurs | whether F4/hop work is still motivated | operator / Task 4 |
 
@@ -333,16 +333,42 @@ scorers); evidence in `logs/tracker-14/`.
 `code/01_platform/04_scripts/stage-capture.sh`; findings in `logs/tracker-14/`.
 **Depends on:** Task 1.
 
-- [ ] Write a Fluss **client** reader probe that polls `raw_table_1` in a tight loop and, per sample,
+- [x] Write a Fluss **client** reader probe that polls `raw_table_1` in a tight loop and, per sample,
       prints the newest `ingest_ts` seen and the wall-clock when it became visible — a stopwatch on
-      `ack → any-reader-visible`, independent of Flink.
-- [ ] Validate it on a known condition (pipeline idle ⇒ no rows; writer active ⇒ rows visible within
-      the sampling period).
-- [ ] Run one arm with it alongside the existing probes; compare `ack→visible` against L1's p99 (23 ms)
+      `ack → any-reader-visible`, independent of Flink. Landed as
+      `code/01_platform/04_scripts/fluss-probes/FlussVisibilityProbe.java` (subscribe-at-log-end, so
+      it only ever sees fresh records; fetch wait pinned to the job's 2 ms). **Two launch rules
+      learned the hard way on 2026-10-06:** a reader probe must be started with
+      `--add-opens=java.base/java.nio=ALL-UNNAMED` (the Fluss client's shaded Arrow cannot
+      initialise `MemoryUtil` on JDK 17; without it the probe dies at the first record with
+      `ExceptionInInitializerError` and exits 0 with zero samples — metadata-only probes such as
+      `FlussReadLagProbe` do not need it, which is why the omission was invisible), and the probe
+      must be added to `PROBES` in `code/01_platform/04_scripts/tests/test_fluss_probes.py` or its
+      source is never compiled by the suite.
+- [x] Validate it on a known condition (pipeline idle ⇒ no rows; writer active ⇒ rows visible within
+      the sampling period). Verified: with the deck writer stopped and the table flat, nothing is
+      readable at log end; with the fleet feeding, both probe runs collected records
+      (`__END__ 108720` / `72694`).
+- [x] Run one arm with it alongside the existing probes; compare `ack→visible` against L1's p99 (23 ms)
       and against the monitor KPI (L3-cumulative). This splits L7 into "Fluss side" (OQ4 → F3 tablet
       work, server source on disk at
       `/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/fluss/fluss-_1.0.0/Fluss_v_1.0.0/`)
-      and "Flink source side" (read→emit batching in the job's source operator).
+      and "Flink source side" (read→emit batching in the job's source operator). **Done 2026-10-06
+      (bg `ba0627fe7`, run `logs/stage-profile-visprobe-1006-185947`, record
+      `logs/tracker-14/20261006-task3a-visibility-probe.md`): the Fluss half is small.** A plain
+      reader sees a record **9 ms p50 after `ingest_ts`, 2 ms floor** (newest_age p90 22–24, p99 38;
+      two consecutive probes, 1 678 + 1 112 samples, 181 414 records) — the same order as the
+      ingestion client's own accept→ack (11–12 ms p50) in the same window, i.e. visibility after the
+      ack costs ~nothing. The Flink scanner's own gauges agree (0 records lag, poll every 2.1 ms) and
+      so do the native markers (whole in-DAG chain ≤ 8 ms p99). Only the record-carried KPI
+      disagrees (68–72 ms) — and it is the only instrument whose clock starts before the record is in
+      the source's hands. **⇒ OQ4 answered: the remaining ~55 ms is between the source's fetch and its
+      emission, i.e. Flink-source-side.**
+- [ ] **Task 3b (the closing instrument):** add a source-side histogram of `emitNow − row.ingest_ts`
+      (per source subtask) plus the same figure at the monitor operator, so the split is measured
+      directly inside one job instead of triangulated across arms. Expected reading if the
+      "fetch→emit queue" hypothesis is right: the source histogram shows the ~55 ms and the monitor's
+      figure adds only the ~3–8 ms of in-DAG transit on top of it.
 - [ ] Explain or discard the `read-lag.tsv` absolute delta (OQ2) and decide whether L6 markers are
       artifacts (OQ3); record both verdicts.
 
