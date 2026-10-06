@@ -75,7 +75,7 @@ admissible if it lands on a leg with an identified owner.
 | L4 | dedup → aggregator | p50 1.0–1.2 / p99 hop +1.3–2.3 (**C0e's +40.6 did not reproduce — OQ6**) | same | aggregator (state, keys, timers) |
 | L5 | aggregator → strategy host | p50 1.8–2.0 / p99 +2.0–3.5 | same | DAG transit |
 | L6 | sinks | p50 0–1, p99 538–777 (suspect) | same — **sparse-stream marker artifact, unproven** | sinks |
-| **L7** | **ack → record emitted by the Flink source** | **~65–69 ms p99 (measured on the Task 1 arms)**; Task 3a split: the Fluss-side half is **~9 ms p50, 2 ms floor** (independent reader), so the remainder is source-side (poll→emit) | `FlussVisibilityProbe` (Fluss half, landed); source-side half still uninstrumented | **source side — Task 3b** |
+| **L7** | **ack → record emitted by the Flink source** | **≤ ~15 ms p99 — corrected 2026-10-06 (Task 3c); the 65–69 ms first booked here was mis-attributed.** Fluss's own source gauge reads a 1–5 ms record age *at fetch* (max 17 of 49 snapshots), `pendingRecords` ≈ 0 (48/49), in-DAG ≤ 8 ms p99. The ~65 ms actually sits **upstream of the log read**, in the ingestion client→tablet publish path | prom `currentFetchEventTimeLag` + `pendingRecords` (Fluss/Flink native, already captured in every arm since 2026-09-26); `FlussVisibilityProbe` (independent reader) | **moved to L1 — Task 3b** |
 
 Total in-DAG transit (L3–L5) is **~4 ms at p50**; the previous "3–5 hops × 10 ms buffer = 30–40 ms"
 model is dead at `BUFFER_TIMEOUT_MS=2`.
@@ -247,6 +247,7 @@ anchor, `code/01_platform/02_sql/ddl/02_raw_table_1.sql`), `Signal_Candidates_cu
 | OQ4 | Is the ~65–69 ms L7 gap on the Fluss side (reader visibility) or inside the Flink source (read→emit batching)? | which repository the fix lives in | **Answered 2026-10-06 (Task 3a): not Fluss-side** — a plain reader sees a record 9 ms p50 after `ingest_ts` (2 ms floor) while the source polls every 2.1 ms with 0 records lag, so the remaining ~55 ms sits between the source's fetch and its emission (Task 3b) |
 | OQ5 | S11 (`closeread.tsv` window-close → first read, declared SLO p99 ≤ 75 ms) measures 1 258–9 576 ms with 100 % of windows "violating" — but the sampler only polls every ~17 s, so can this path measure 75 ms at all? | whether a declared SLO is verifiable by the current instrument | measurement track (M-items) |
 | OQ6 | Did the C0e aggregator p99 hop (+40.6 ms) have a cause, or was it one run's tail? Task 1's two arms measured +1.3/+2.3 ms on the same config, so the standing term is gone — decide whether to re-open it only if it recurs | whether F4/hop work is still motivated | operator / Task 4 |
+| OQ7 | The 64 MB writer buffer pool, the pinned 64 KiB batch, the 1 ms linger and per-record submits produce ~1 600 requests/s per ingestion JVM (`FlussClientAdapter.connect()`). **Which sub-interval of accept→ack owns the ~55–62 ms p99**: pool wait, Sender queue, send/RTT, server append, or response handling? Also: what exactly does `append.pending.records` (standing 530–776) count? | which knob (if any) is worth an arm, and whether the read-side program can reach PT1 at all | **Task 3b** |
 
 ## Implementation Roadmap
 
@@ -286,13 +287,24 @@ scorers); evidence in `logs/tracker-14/`.
 - **Noise floor = 8 ms** ⇒ a material effect must exceed **12 ms** (1.5 × the floor, NFR2) *and*
   reproduce in a second arm; compare **medians**, never `max` (C0e monitor max was 463 against
   74–77 here on the same config).
-- **L7 is confirmed as the only material term**: monitor p99 68–72 minus cumulative source→dedup p99
-  2.7–3.4 ⇒ **65–69 ms** between the ingestion ack and the Flink source emitting the row, versus
-  ~4 ms p50 / 6.7–8.0 ms p99 for the whole in-DAG chain. Task 3's instrument is the next step; no
-  other lever can move PT1 by more than ~10 ms.
+- ~~**L7 is confirmed as the only material term**~~ **CORRECTED 2026-10-06 (Task 3c) — the 65–69 ms
+  first booked here is not L7.** Subtracting the *p99 of the whole in-DAG chain* from a KPI that is
+  itself a p99 is a valid bound only if the ack p99 in the same window is small; in arm 1 the
+  ingestion client's own accept→ack p99 was **62 ms in those same windows**, so the subtraction
+  charged L7 with a tail that belongs to L1. Native instruments then closed the question from the
+  other end: at fetch the newest record's own age is 1–5 ms, the reader queue is empty, and the chain
+  is ≤ 8 ms — leaving ≲15 ms for the whole post-append path. **The p99 budget is spent before the
+  record reaches the log**, i.e. in L1/Task 3b — and this is also why every read-side lever
+  (F1 fetch window, F2 buffer timeout, certified checkpoint profile, `kv.snapshot.interval`) failed to
+  move PT1 reproducibly: they are all downstream of the term that owns the tail.
 - **The C0e aggregator p99 hop did not reproduce** (+1.3 / +2.3 ms here vs +40.6 ms in C0e) — see OQ6.
 - **L1 (append ack) is itself noisy**: p99 median 60 (arm 1) vs 33 (arm 2) vs 23 (C0e). L1 claims need
-  repeats, and it is not the SLO carrier.
+  repeats. **Corrected 2026-10-06: L1 *is* the SLO carrier** — the same-window comparison above shows
+  the client's own accept→ack p99 tracking the KPI's scale (arm 1: ack 62 / KPI 72; arm 2: ack 35 /
+  KPI 68; C0e: ack 26 / KPI 68), while the whole post-append path measures ≲15 ms. The KPI's own
+  stability (67–77 in 147/147 snapshots across three unlike arms) and its weak correlation with the
+  ack p99 (Pearson r 0.46 / 0.29 / 0.16) say the two are *different windows of one slow path*, not
+  two independent effects — a standing queue with a tail, not a load response.
 - Cost guards green in both arms: throughput 4 962 / 5 019 rows/s, backpressure ≤ 85 ms/s, busiest
   operator ≤ 103 ms/s, 15 / 16 aligned checkpoints, GC ≥15 ms at 11 / 7 events (max 30.2 / 35.9 ms),
   `raw_table_1` +187.09 / +175.32 MB/min with the deck writer stopped.
@@ -307,13 +319,25 @@ scorers); evidence in `logs/tracker-14/`.
       committed in `c7d4acf0` (CHG-544/CHG-545, test present). `run-meta.txt` already carries
       `rate_hz`, `checkpoint_interval_ms`, `probe_table`/`probe_tokens`, `topology_branches`,
       `topology_operators`, `topology_flags_requested`.
-- [ ] Extend the FR2 metadata block with what is still missing: feed type (ms test feed vs production),
+- [x] Extend the FR2 metadata block with what is still missing: feed type (ms test feed vs production),
       deck `01_docker-ingestion-1` state (running/stopped), tablet `kv.snapshot.interval`,
       `UNALIGNED_CHECKPOINTS` / `CHANGELOG_STATE_BACKEND`, and the F1/F2 values in force.
-- [ ] Make the prom-staleness failure mark the run `partial` in the same file instead of only failing
-      the phase.
-- [ ] Add a test asserting the extended metadata block is written when the arm starts.
-- [ ] Fix the prom-staleness budget so it cannot false-fail a healthy run. Evidence: C0e
+      **Landed (CHG-550):** `feed_type`, `unaligned_checkpoints`, `changelog_state_backend`,
+      `scanner_fetch_wait_max_time_ms`, `buffer_timeout_ms` from the caller env, plus two read back
+      from the running stack — `deck_ingestion_state` (`docker ps -a` on
+      `01_docker-ingestion-1`, which doubled C0d's growth rate while up) and
+      `tablet_kv_snapshot_interval` (`docker exec … grep '^kv.snapshot.interval'
+      /opt/fluss/conf/server.yaml`, dev 1m vs certified 0s). `stage-profile.sh` now passes
+      `FEED_TYPE="$FEED"` into capture.
+- [x] Make the prom-staleness failure mark the run `partial` in the same file instead of only failing
+      the phase. **Landed (CHG-550):** `partial=yes` + `partial_reason=prom-stale:<gap>s>budget<N>s`,
+      so "truncated" cannot be misread as "never measured".
+- [x] Add a test asserting the extended metadata block is written when the arm starts.
+      `test_run_meta_records_the_arm_configuration` (hermetic stubs, including the two
+      docker-derived fields); `test_stale_prom_marks_the_run_partial` covers the partial marking and
+      `test_prom_endpoint_dead_at_capture_start_fails_before_capturing` pins the START gate as the
+      owner of dead-at-start (rc 1 before the timed window). File: 8 passed.
+- [x] Fix the prom-staleness budget so it cannot false-fail a healthy run. Evidence: C0e
       (`logs/stage-profile-armC0e-clean-1006-105008`) exited 1 on
       `!! FAIL: last prom scrape was 26s ago (budget 25s at interval 5s; …)` while its capture was
       complete (48 snapshots, gate PASS, `stage-capture: duration reached (900s)`). The budget is
@@ -325,6 +349,10 @@ scorers); evidence in `logs/tracker-14/`.
       no further snapshots, so its gap grows without bound) and stops flagging healthy runs. The
       Task 1 arms exited 0 on the same cadence, i.e. the check is borderline rather than wrong in
       intent — fix it with Task 2 so a run's `rc` keeps meaning something.
+      **Landed (CHG-550):** the budget is now `max(25, 2 × observed_max_gap)` computed from the
+      epochs in the run's own `prom-*.txt` names, and the four values behind the verdict
+      (`prom_snapshots`, `prom_observed_max_gap_s`, `prom_staleness_budget_s`, `prom_final_gap_s`)
+      are appended to `run-meta.txt` whichever way the run ends.
 
 ### Task 3: Attribute L7 (ack → Flink-source emit) and re-check L2/L6 instruments
 **Why:** L7 is the largest unexplained term — measured ~65–69 ms on the Task 1 noise-floor arms, i.e.
@@ -364,11 +392,30 @@ scorers); evidence in `logs/tracker-14/`.
       disagrees (68–72 ms) — and it is the only instrument whose clock starts before the record is in
       the source's hands. **⇒ OQ4 answered: the remaining ~55 ms is between the source's fetch and its
       emission, i.e. Flink-source-side.**
-- [ ] **Task 3b (the closing instrument):** add a source-side histogram of `emitNow − row.ingest_ts`
-      (per source subtask) plus the same figure at the monitor operator, so the split is measured
-      directly inside one job instead of triangulated across arms. Expected reading if the
-      "fetch→emit queue" hypothesis is right: the source histogram shows the ~55 ms and the monitor's
-      figure adds only the ~3–8 ms of in-DAG transit on top of it.
+- [x] **Task 3c (2026-10-06, done, no arm needed — the instrument was already on disk):** the
+      Fluss source's own reader gauge `currentFetchEventTimeLag` has been captured in **every** arm
+      since 2026-09-26 (`code/01_platform/04_scripts/stage-capture.sh` scrapes the
+      `flink_taskmanager_job_task_operator_` family). Bytecode-verified semantics
+      (`org.apache.fluss.flink.source.reader.FlinkSourceSplitReader.forLogRecords`: offsets 0 and
+      335–350): `System.currentTimeMillis() − max(ScanRecord.timestamp())` over the fetched batch, i.e.
+      **the age of the newest record at the instant the reader fetched it**, updated per fetch.
+      Result on the Task 1 arms (49 snapshots each, same windows as the KPI): worst-subtask value
+      **1–5 ms, max 17 ms, 0/49 ≥ 30 ms**; `pendingRecords` **0.0 in 48/49** (one 24). Against the
+      same-window KPI (arm 1: `ingest_to_monitor` p99 72; arm 2: 68) and the client's own
+      `append.latency.ms` p99 (62 / 35), the post-append path is ≲15 ms and L1 owns the rest.
+      **⇒ OQ4 is re-answered: neither Fluss-side nor Flink-source-side — upstream of both.** The
+      earlier Task 3a conclusion (2026-10-06, same day) came from comparing a *p50* reader age (9 ms)
+      against the *p99* KPI; the probe's own p99 was 38 ms (max 105–142), which already carried the
+      write-path tail. Record: `logs/tracker-14/20261006-l7-write-path-attribution.md`.
+- [ ] **Task 3b (revised — the write path, not the source):** split L1's accept→ack into intervals we
+      can act on, using what the client already exposes plus one small histogram in our own writer:
+      (i) zero-code: probe the Fluss client jar for the writer-buffer keys and their defaults
+      (`client.writer.buffer.memory-size`/`page-size` — the repo relies on a "64MB pool" per the
+      `FlussClientAdapter.connect()` comment) and establish what `append.pending.records` counts;
+      (ii) one change in `code/02_services/01_ingestion/`: histogram the pool/buffer wait
+      (`RawTickWriter.submitAppend` entry → return) separately from send→ack, beside the existing
+      `append.latency.ms`. Then decide whether the lever is a client knob (batch/pool sizing) or a
+      tablet/write-path item. Nothing in this task touches the DAG.
 - [ ] Explain or discard the `read-lag.tsv` absolute delta (OQ2) and decide whether L6 markers are
       artifacts (OQ3); record both verdicts.
 

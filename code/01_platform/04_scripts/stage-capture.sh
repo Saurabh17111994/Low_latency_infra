@@ -241,6 +241,36 @@ done
   echo "rate_hz=${RATE_HZ:-unset}"
   echo "checkpoint_interval_ms=${CHECKPOINT_INTERVAL_MS:-unset}"
   echo "checkpoint_timeout_ms=${CHECKPOINT_TIMEOUT_MS:-unset}"
+  # Arm configuration that changed the MEANING of a past measurement but was
+  # not written down (2026-10-06): the feed type (the ms fake broker vs the
+  # production feed, which decides whether tick_to_strategy is even valid), the
+  # checkpoint profile (dev submits UNALIGNED_CHECKPOINTS=true while the
+  # certified production profile is aligned-only + changelog backend, CHG-541 /
+  # CHG-543), and the two latency knobs F1/F2. Source: the caller's environment
+  # (the same place pipeline-lib.sh reads them), recorded as requested values.
+  echo "feed_type=${FEED_TYPE:-unset}"
+  echo "unaligned_checkpoints=${UNALIGNED_CHECKPOINTS:-unset}"
+  echo "changelog_state_backend=${CHANGELOG_STATE_BACKEND:-unset}"
+  echo "scanner_fetch_wait_max_time_ms=${FLUSS_SCANNER_FETCH_WAIT_MAX_TIME_MS:-unset}"
+  echo "buffer_timeout_ms=${BUFFER_TIMEOUT_MS:-unset}"
+  # Host-side state that silently changed past arms: a live deck writer shares
+  # raw_table_1 with the fleet (the 2026-10-06 F1+F2 arm ran with
+  # 01_docker-ingestion-1 live and its growth rate went 179 -> 405 MB/min), and
+  # the tablet's KV snapshot cadence differs between dev (.env: 1m) and the
+  # certified production default (0s).
+  deck_state="$(docker ps -a --filter name=01_docker-ingestion-1 \
+    --format '{{.State}} restarts={{.RestartCount}}' 2>/dev/null | head -1)"
+  echo "deck_ingestion_state=${deck_state:-unset}"
+  kv_tablet_ctr="$(docker ps -q --filter name=fluss-tablet 2>/dev/null | head -1)"
+  tablet_kv=""
+  # Name kept distinct from sample_state_growth()'s own `local tablet_ctr`.
+  if [ -n "$kv_tablet_ctr" ]; then
+    tablet_kv="$(docker exec "$kv_tablet_ctr" grep -h '^kv.snapshot.interval' \
+      /opt/fluss/conf/server.yaml 2>/dev/null | head -1)"
+    tablet_kv="${tablet_kv#kv.snapshot.interval:}"      # key: value -> value
+    tablet_kv="${tablet_kv#"${tablet_kv%%[![:space:]]*}"}"  # strip leading blanks
+  fi
+  echo "tablet_kv_snapshot_interval=${tablet_kv:-unset}"
   echo "load_avg=$(cut -d' ' -f1-3 /proc/loadavg)"
   echo "ingestion_java_out=${INGESTION_JAVA_OUT:-unset}"
   echo "fluss_probe_cp=${FLUSS_PROBE_CP:+set}"       # never echo the cp path (huge)
@@ -1203,9 +1233,37 @@ if [ -n "$latest_prom" ]; then
   # P6-565: the staleness budget scales with the configured cadence (5x
   # interval, 25s floor) — a fixed 25s spuriously failed slow-cadence runs
   # and waved through multi-miss gaps on fast ones.
-  _max_gap=$((CAPTURE_INTERVAL_S * 5)); [ "$_max_gap" -lt 25 ] && _max_gap=25
-  if [ $((now_s - last_scrape_s)) -gt "$_max_gap" ]; then
-    echo "!! FAIL: last prom scrape was $((now_s - last_scrape_s))s ago (budget ${_max_gap}s at interval ${CAPTURE_INTERVAL_S}s; TM prom endpoint died before capture end) — latency/custom legs are truncated; check TM heartbeat." >&2
+  # 2026-10-06, prompted by C0e: the configured cadence is only an upper bound
+  # on the OBSERVED spacing, which is probe-bound (the same tick also runs the
+  # Fluss/ingestion probes) — measured 17s median / 24s max in the Task 1 arms
+  # and 16-23s in C0e, i.e. C0e's interval-derived 25s budget sat inside one
+  # trailing iteration's noise and the phase exited 1 on a 26s gap even though
+  # its capture was complete (900s, 48 snapshots, presence gate PASS). Derive
+  # the budget from the run's own worst observed gap instead (twice it, 25s
+  # floor). A genuinely dead TM endpoint produces no further snapshots, so its
+  # gap grows without bound and still trips this check.
+  observed_max_gap="$(ls -1 "$OUT_DIR"/prom-*.txt 2>/dev/null \
+    | sed 's/.*prom-//; s/\.txt$//' | sort -n \
+    | awk 'NR>1 && $1-prev>m {m=$1-prev} {prev=$1} END {print m+0}')"
+  prom_budget=$((observed_max_gap * 2)); [ "$prom_budget" -lt 25 ] && prom_budget=25
+  prom_gap=$((now_s - last_scrape_s))
+  # Recorded before the verdict so a later reader can see what the budget was
+  # derived from, whichever way the run ends.
+  {
+    echo "prom_snapshots=$(ls -1 "$OUT_DIR"/prom-*.txt 2>/dev/null | wc -l)"
+    echo "prom_observed_max_gap_s=$observed_max_gap"
+    echo "prom_staleness_budget_s=$prom_budget"
+    echo "prom_final_gap_s=$prom_gap"
+  } >> "$OUT_DIR/run-meta.txt"
+  if [ "$prom_gap" -gt "$prom_budget" ]; then
+    # Mark the run partial in its own evidence file: the KPI/latency legs are
+    # truncated, so the run is still a failure, but a reader must be able to
+    # tell "truncated" from "never measured" without reading the harness log.
+    {
+      echo "partial=yes"
+      echo "partial_reason=prom-stale:${prom_gap}s>budget${prom_budget}s"
+    } >> "$OUT_DIR/run-meta.txt"
+    echo "!! FAIL: last prom scrape was ${prom_gap}s ago (budget ${prom_budget}s = 2x the run's worst observed gap ${observed_max_gap}s, 25s floor at interval ${CAPTURE_INTERVAL_S}s; TM prom endpoint died before capture end) — latency/custom legs are truncated; check TM heartbeat. Recorded partial=yes in run-meta.txt." >&2
     exit 2
   fi
 fi

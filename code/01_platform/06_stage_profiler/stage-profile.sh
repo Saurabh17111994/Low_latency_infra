@@ -492,6 +492,7 @@ run_capture() {
     INGESTION_JAVA_OUT="$PHASE_DIR/capture/j1-0/java.out" \
     FLUSS_PROBE_CP="$CP" OUT_DIR="$PHASE_DIR/stages" PROBE_TOKENS="$TOKENS" \
     FLINK_REST_URL="$FLINK_REST_URL" RATE_HZ="$CAPTURE_RATE_HZ" \
+    FEED_TYPE="$FEED" \
     bash "$CAPTURE_SH" >"$PHASE_DIR/stage-capture.log" 2>&1 \
     || fail "stage-capture failed (see $PHASE_DIR/stage-capture.log)"
   say "capture done ($(wc -l < "$PHASE_DIR/stages/stages.tsv" 2>/dev/null || echo 0) Flink rows)"

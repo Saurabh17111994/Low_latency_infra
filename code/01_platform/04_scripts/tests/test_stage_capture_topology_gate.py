@@ -46,20 +46,52 @@ FULL_VERTICES = REDUCED_VERTICES + [
 ]
 
 
-def _stub_bin(tmp_path: Path, vertices: list[dict[str, str]], java_rows: str) -> Path:
+def _stub_bin(
+    tmp_path: Path,
+    vertices: list[dict[str, str]],
+    java_rows: str,
+    prom_dead: bool = False,
+    slow_capture_sleep_s: int = 0,
+) -> Path:
     """curl/sleep/docker/java/javac stubs — no Flink, no cluster, no real JVM."""
     d = tmp_path / "stubs"
-    d.mkdir()
+    # exist_ok: the staleness test rebuilds the stubs with a dead prom endpoint.
+    d.mkdir(exist_ok=True)
     job_json = tmp_path / "job.json"
     job_json.write_text(json.dumps({"state": "RUNNING", "vertices": vertices}))
     (tmp_path / "java-out.tsv").write_text(java_rows)
     (d / "curl").write_text(
         "#!/usr/bin/env bash\n"
-        f'case "$*" in *"/jobs/"*) cat {job_json};; esac\n'
+        # prom_dead simulates a TM prom endpoint that stopped answering mid-run
+        # (the staleness case): no further prom-*.txt is produced.
+        + ('case "$*" in *"/metrics"*) exit 22;; esac\n' if prom_dead else "")
+        + f'case "$*" in *"/jobs/"*) cat {job_json};; esac\n'
         "exit 0\n"
     )
-    (d / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n")
-    (d / "docker").write_text("#!/usr/bin/env bash\nexit 0\n")
+    # The capture loop's own `sleep "$CAPTURE_INTERVAL_S"` is the one pacing
+    # call; the staleness case needs the run's LAST snapshot to age past the
+    # budget without the stub run taking minutes of real time. /bin/sleep — a
+    # bare `sleep` would re-enter this stub through PATH.
+    (d / "sleep").write_text(
+        "#!/usr/bin/env bash\n"
+        + (
+            f'[ "$1" = "1" ] && /bin/sleep {slow_capture_sleep_s}\n'
+            if slow_capture_sleep_s
+            else ""
+        )
+        + "exit 0\n"
+    )
+    # The docker stub answers the two host-state lookups the metadata block
+    # makes (deck writer state, tablet KV snapshot cadence).
+    (d / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$*" in\n'
+        '  *"01_docker-ingestion-1"*) echo "running restarts=0";;\n'
+        '  *"fluss-tablet"*) echo "deadbeefcafe";;\n'
+        '  *"kv.snapshot.interval"*) echo "kv.snapshot.interval: 1m";;\n'
+        "esac\n"
+        "exit 0\n"
+    )
     (d / "java").write_text(f"#!/usr/bin/env bash\ncat {tmp_path}/java-out.tsv\nexit 0\n")
     (d / "javac").write_text("#!/usr/bin/env bash\nexit 0\n")
     for f in d.iterdir():
@@ -175,3 +207,89 @@ def test_reduced_topology_stays_legal(tmp_path: Path) -> None:
         "topology_flags_requested= STRATEGY_HOST_ENABLED=off MULTITF_ENABLED=off "
         "EXECUTION_INTENT_ENABLED=off" in _run_meta(tmp_path)
     ), out
+
+
+def test_run_meta_records_the_arm_configuration(tmp_path: Path) -> None:
+    """Task 2 (2026-10-06): an arm's own configuration must be in its evidence.
+
+    Four 2026-10-06 arms were compared as if equivalent while they differed in
+    ways nothing recorded: the feed (the ms fake broker vs the production feed,
+    which decides whether the event-time KPI is even valid), the checkpoint
+    profile (dev submits unaligned + no changelog backend while the certified
+    production profile is aligned-only + changelog, CHG-541/CHG-543), the two
+    latency knobs F1/F2, whether the live deck writer was sharing raw_table_1
+    (it doubled the measured growth rate), and the tablet's KV snapshot cadence
+    (dev 1m vs the certified 0s).
+    """
+    stubs = _stub_bin(tmp_path, FULL_VERTICES, java_rows="")
+    proc = _run(
+        tmp_path,
+        stubs,
+        {
+            "FEED_TYPE": "faketool",
+            "UNALIGNED_CHECKPOINTS": "false",
+            "CHANGELOG_STATE_BACKEND": "true",
+            "FLUSS_SCANNER_FETCH_WAIT_MAX_TIME_MS": "2",
+            "BUFFER_TIMEOUT_MS": "2",
+        },
+    )
+    meta = _run_meta(tmp_path)
+    for expected in (
+        "feed_type=faketool",
+        "unaligned_checkpoints=false",
+        "changelog_state_backend=true",
+        "scanner_fetch_wait_max_time_ms=2",
+        "buffer_timeout_ms=2",
+        # Host facts read back from the running stack, not from the caller.
+        "deck_ingestion_state=running restarts=0",
+        "tablet_kv_snapshot_interval=1m",
+    ):
+        assert expected in meta, f"{expected!r} missing from run-meta.txt:\n{meta}"
+    assert proc.returncode != 1, proc.stdout + proc.stderr
+
+
+def test_stale_prom_marks_the_run_partial(tmp_path: Path) -> None:
+    """A truncated prom leg must be readable from run-meta.txt, not only from rc.
+
+    C0e (2026-10-06) exited 1 on "last prom scrape was 26s ago (budget 25s)" at
+    the end of a COMPLETE 900s capture (48 snapshots, presence gate PASS): the
+    budget scaled only with the CONFIGURED cadence while the observed spacing is
+    probe-bound (17s median / 24s max measured in the Task 1 arms). The budget is
+    now twice the run's own worst observed gap (25s floor) and a genuine failure
+    marks the run partial, so "truncated" cannot be misread as "never measured".
+
+    A prom endpoint that is dead from the START never reaches this branch — the
+    pre-run liveness leg fails first (pinned by
+    test_prom_endpoint_dead_at_capture_start_fails_before_capturing). Here the
+    endpoint answers, the run captures, and the newest snapshot then ages past
+    the budget because the last pacing sleep outlives it.
+    """
+    stubs = _stub_bin(
+        tmp_path, FULL_VERTICES, java_rows="", slow_capture_sleep_s=30
+    )
+    proc = _run(tmp_path, stubs, {})
+    meta = _run_meta(tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "partial=yes" in meta, meta
+    assert "partial_reason=prom-stale:" in meta, meta
+    # The budget is derived from this run's own spacing: one snapshot ⇒ no
+    # observed gap ⇒ the 25s floor applies, so a 30s trailing gap trips it.
+    assert "prom_observed_max_gap_s=0" in meta, meta
+    assert "prom_staleness_budget_s=25" in meta, meta
+
+
+def test_prom_endpoint_dead_at_capture_start_fails_before_capturing(
+    tmp_path: Path,
+) -> None:
+    """A prom endpoint that never answers is caught by the START gate, not the tail.
+
+    Keeps the two failure modes apart on purpose: dead-at-start is a hard rc 1
+    BEFORE the timed window (no evidence is worth capturing), while dying
+    mid-run is the tail's partial=yes. Wiring them together would let a dead
+    endpoint burn 900s of a broken capture.
+    """
+    stubs = _stub_bin(tmp_path, FULL_VERTICES, java_rows="", prom_dead=True)
+    proc = _run(tmp_path, stubs, {})
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, out
+    assert "not answering at capture start" in out, out
